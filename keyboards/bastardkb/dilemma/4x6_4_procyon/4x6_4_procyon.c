@@ -110,9 +110,7 @@ bool rgb_matrix_indicators_advanced_kb(uint8_t led_min, uint8_t led_max) {
         const RGB rgb = hsv_to_rgb(hsv);
 
         for (int i = led_min; i < led_max; i++) {
-            if (HAS_FLAGS(g_led_config.flags[i], LED_FLAG_UNDERGLOW)) {
-                rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
-            }
+            rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
         }
     }
     return true;
