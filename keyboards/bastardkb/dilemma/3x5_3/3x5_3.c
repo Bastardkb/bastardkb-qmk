@@ -20,23 +20,6 @@
 
 #include "dilemma.h"
 
-#ifdef ENCODER_ENABLE
-bool encoder_update_kb(uint8_t index, bool clockwise) {
-    if (!encoder_update_user(index, clockwise)) {
-        return false;
-    }
-    switch (index) {
-        case 0: // Left-half encoder, mouse scroll.
-            tap_code(clockwise ? KC_MS_WH_UP : KC_MS_WH_DOWN);
-            break;
-        case 1: // Right-half encoder, volume control.
-            tap_code(clockwise ? KC_AUDIO_VOL_UP : KC_AUDIO_VOL_DOWN);
-            break;
-    }
-    return true;
-}
-#endif // ENCODER_ENABLE
-
 #ifdef RGB_MATRIX_ENABLE
 // Layer state indicator
 bool rgb_matrix_indicators_advanced_kb(uint8_t led_min, uint8_t led_max) {

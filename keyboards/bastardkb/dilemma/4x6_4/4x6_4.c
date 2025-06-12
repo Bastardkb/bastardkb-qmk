@@ -40,23 +40,6 @@ const uint8_t PROGMEM encoder_hand_swap_config[NUM_ENCODERS] = {1, 0};
 #    endif
 #endif
 
-#ifdef ENCODER_ENABLE
-bool encoder_update_kb(uint8_t index, bool clockwise) {
-    if (!encoder_update_user(index, clockwise)) {
-        return false;
-    }
-    switch (index) {
-        case 0: // Left-half encoder, mouse scroll.
-            tap_code(clockwise ? KC_MS_WH_DOWN : KC_MS_WH_UP);
-            break;
-        case 1: // Right-half encoder, volume control.
-            tap_code(clockwise ? KC_AUDIO_VOL_UP : KC_AUDIO_VOL_DOWN);
-            break;
-    }
-    return true;
-}
-#endif // ENCODER_ENABLE
-
 #ifdef RGB_MATRIX_ENABLE
 static HSV _get_hsv_for_layer_index(uint8_t layer) {
     switch (layer) {
