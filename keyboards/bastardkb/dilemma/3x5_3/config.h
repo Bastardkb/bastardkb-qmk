@@ -29,16 +29,7 @@
 #define CRC8_USE_TABLE
 #define CRC8_OPTIMIZE_SPEED
 
-#if 1
-#   define I2C_DRIVER I2CD1
-#   define I2C1_SDA_PIN GP2
-#   define I2C1_SCL_PIN GP3
-#   define I2C1_CLOCK_SPEED 1000000
-#   define DIGITIZER_MOTION_PIN GP12
-#   define DIGITIZER_MOTION_PIN_ACTIVE_LOW yes
-#   define PROCYON_42_50
-#else
-    /* Cirque trackpad over SPI. */
+/* Cirque trackpad over SPI. */
 #   define SPI_DRIVER SPID0
 #   define SPI_SCK_PIN GP22
 #   define SPI_MOSI_PIN GP23
@@ -46,7 +37,6 @@
 #   define POINTING_DEVICE_CS_PIN GP21
 #   undef CIRQUE_PINNACLE_DIAMETER_MM
 #   define CIRQUE_PINNACLE_DIAMETER_MM 40
-#endif
 
 /* Reset. */
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET
