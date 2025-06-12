@@ -24,6 +24,14 @@
 #    include "print.h"
 #endif // CONSOLE_ENABLE
 
+#ifndef LAYER_INDICATOR_BRIGHTNESS_INC
+#    define LAYER_INDICATOR_BRIGHTNESS_INC 22
+#endif
+
+#ifndef CAPSLOCK_INDICATOR_BRIGHTNESS_INC
+#    define CAPSLOCK_INDICATOR_BRIGHTNESS_INC 76
+#endif
+
 #ifdef POINTING_DEVICE_ENABLE
 #    ifndef DILEMMA_MINIMUM_DEFAULT_DPI
 #        define DILEMMA_MINIMUM_DEFAULT_DPI 400
@@ -328,6 +336,81 @@ void matrix_init_kb(void) {
     matrix_init_user();
 }
 #endif // POINTING_DEVICE_ENABLE
+
+
+#ifdef RGB_MATRIX_ENABLE
+static HSV _get_hsv_for_layer_index(uint8_t layer) {
+    switch (layer) {
+        case 1:
+            return (HSV){HSV_BLUE};
+        case 2:
+            return (HSV){HSV_ORANGE};
+        case 3:
+            return (HSV){HSV_AZURE};
+        case 4:
+            return (HSV){HSV_GREEN};
+        case 5:
+            return (HSV){HSV_TEAL};
+        case 6:
+            return (HSV){HSV_PURPLE};
+        case 7:
+        default:
+            return (hsv_t){HSV_RED};
+            break;
+    };
+}
+
+// Layer state indicator
+bool rgb_matrix_indicators_advanced_kb(uint8_t led_min, uint8_t led_max) {
+    if (!rgb_matrix_indicators_advanced_user(led_min, led_max)) {
+        return false;
+    }
+
+    // Set underglow to a solid color for highest active layer apart from the base layer.
+    const uint8_t layer = get_highest_layer(layer_state);
+    if (layer > 0) {
+        HSV hsv = _get_hsv_for_layer_index(layer);
+
+        // Set brightness to the configured interval brighter than current brightness, clamped to 255 (ie. uint8_t max value). This compensates for the dimmer appearance of the underglow LEDs.
+        hsv.v         = MIN(rgb_matrix_get_val() + LAYER_INDICATOR_BRIGHTNESS_INC, 255);
+        const RGB rgb = hsv_to_rgb(hsv);
+
+        for (int i = led_min; i < led_max; i++) {
+            rgb_matrix_set_color(i, rgb.r, rgb.g, rgb.b);
+        }
+    }
+    
+    // Set underglow LEDs to red if caps lock is enabled
+    if (host_keyboard_led_state().caps_lock) {
+        for (int i = led_min; i <= led_max; i++) {
+            if (HAS_FLAGS(g_led_config.flags[i], LED_FLAG_UNDERGLOW)){
+                // set modifier-flagged LEDs to a pure a configured interval brighter than the current brightness, clamped to 255 (ie. uint8_t max value).
+                rgb_matrix_set_color(i, MIN(rgb_matrix_get_val() + CAPSLOCK_INDICATOR_BRIGHTNESS_INC, 255), 0, 0);
+            }
+        }
+    }
+
+    return true;
+};
+#endif // RGB_MATRIX_ENABLE
+
+#ifdef ENCODER_ENABLE
+bool encoder_update_kb(uint8_t index, bool clockwise) {
+    if (!encoder_update_user(index, clockwise)) {
+        return false;
+    }
+    switch (index) {
+        case 0: // Left-half encoder, mouse scroll.
+            tap_code(clockwise ? KC_MS_WH_DOWN : KC_MS_WH_UP);
+            break;
+        case 1: // Right-half encoder, volume control.
+            tap_code(clockwise ? KC_AUDIO_VOL_UP : KC_AUDIO_VOL_DOWN);
+            break;
+    }
+    return true;
+}
+#endif // ENCODER_ENABLE
+
 
 // Forward declare RP2040 SDK declaration.
 void gpio_init(uint gpio);

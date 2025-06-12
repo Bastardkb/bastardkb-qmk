@@ -20,14 +20,6 @@
 
 #include "dilemma.h"
 
-#ifndef LAYER_INDICATOR_BRIGHTNESS_INC
-#    define LAYER_INDICATOR_BRIGHTNESS_INC 22
-#endif
-
-#ifndef CAPSLOCK_INDICATOR_BRIGHTNESS_INC
-#    define CAPSLOCK_INDICATOR_BRIGHTNESS_INC 76
-#endif
-
 #ifdef SWAP_HANDS_ENABLE
 const keypos_t PROGMEM hand_swap_config[MATRIX_ROWS][MATRIX_COLS] = {
     /* Left hand, matrix positions */

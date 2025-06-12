@@ -24,12 +24,6 @@
             }
         }
     },
-    "encoder": {
-        "enabled" : true,
-        "rotary" : [
-            {"pin_a": "GP25", "pin_b": "GP24"}
-        ]
-    },
     "features": {
         "bootmagic": true,
         "command": false,
