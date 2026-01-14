@@ -104,11 +104,46 @@ static bool digitizer_mouse_fallback_init(void)
  *
  * @return report_mouse_t
  */
+/* Spike detection to filter stale data after DPI/CPI changes
+ *
+ * MaxTouch digitizer coordinates are scale-dependent. When CPI changes, the same
+ * physical position reports different absolute coordinates, causing large position
+ * jumps in the first few frames after the change. We scan for these spikes and
+ * discard the first report that exceeds the threshold.
+ */
+#define SPIKE_THRESHOLD 100           /* Magnitude above this is considered a stale delta */
+#define SPIKE_SCAN_FRAMES 150         /* Max frames to scan for spike after CPI change */
+static uint16_t g_frames_since_cpi_change;  /* Frame counter since last CPI change */
+static bool     g_spike_found;               /* Whether we've found and discarded the spike */
+static uint8_t  g_last_cpi;                  /* Track CPI changes to detect transitions */
+
 static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report) {
     if (digitizer_send_mouse_reports) {
         report_mouse_t report = mouse_report;
-        // Retain the button state, but drop any motion.
+        /* Retain the button state, but drop any motion. */
         memset(&mouse_report, 0, sizeof(report_mouse_t));
+
+        /* Spike detection: discard stale deltas after CPI changes */
+        uint16_t current_cpi = digitizer_get_cpi();
+        if (current_cpi != g_last_cpi) {
+            /* CPI changed - reset spike detection state */
+            g_frames_since_cpi_change = 0;
+            g_spike_found = false;
+            g_last_cpi = current_cpi;
+        }
+
+        if (!g_spike_found && g_frames_since_cpi_change < SPIKE_SCAN_FRAMES) {
+            g_frames_since_cpi_change++;
+            int16_t magnitude = (report.x < 0 ? -report.x : report.x) +
+                              (report.y < 0 ? -report.y : report.y);
+            if (magnitude > SPIKE_THRESHOLD) {
+                /* Found the spike - discard it */
+                g_spike_found = true;
+                report.x = 0;
+                report.y = 0;
+            }
+        }
+
         mouse_report.buttons = report.buttons;
         return report;
     }
@@ -207,8 +242,12 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
             if (contacts == 0) {
                 state = None;
             } else if (contacts == 1) {
-                mouse_report.x = x - last_x;
-                mouse_report.y = y - last_y;
+                if (x && y && last_x && last_y) {
+                    mouse_report.x = x - last_x;
+                    mouse_report.y = y - last_y;
+                }
+                last_x = x;
+                last_y = y;
             } else if (contacts == 3 && duration < DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
                 state = Swipe;
             } else {
@@ -302,7 +341,5 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         if (digitizer_taps_as_clicks) report->button3 = 1;
     }
     last_contacts = contacts;
-    last_x        = x;
-    last_y        = y;
 }
 #endif
