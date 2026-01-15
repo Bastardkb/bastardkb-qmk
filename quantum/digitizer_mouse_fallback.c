@@ -115,7 +115,7 @@ static bool digitizer_mouse_fallback_init(void)
 #define SPIKE_SCAN_FRAMES 150         /* Max frames to scan for spike after CPI change */
 static uint16_t g_frames_since_cpi_change;  /* Frame counter since last CPI change */
 static bool     g_spike_found;               /* Whether we've found and discarded the spike */
-static uint8_t  g_last_cpi;                  /* Track CPI changes to detect transitions */
+static uint16_t g_last_cpi = 0;                  /* Track CPI changes to detect transitions */
 
 static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report) {
     if (digitizer_send_mouse_reports) {
