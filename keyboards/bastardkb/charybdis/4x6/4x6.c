@@ -54,7 +54,7 @@ led_config_t g_led_config = { {
     {     30,     35,     38,     43,     46,     50 }, // Top row
     {     31,     34,     39,     42,     47,     51 }, // Middle row
     {     32,     33,     40,     41,     48,     52 }, // Bottom row
-    { NO_LED,     53,     55,     54, NO_LED, NO_LED }, // Thumb cluster
+    { NO_LED,     53,     NO_LED, 54, NO_LED,     55 }, // Thumb cluster
 }, {
     /* LED index to physical position. */
     // Left split.
