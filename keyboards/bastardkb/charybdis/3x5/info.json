@@ -5,6 +5,7 @@
         "device_version": "2.0.0",
         "pid": "0x1832"
     },
+    "diode_direction": "ROW2COL",
     "rgb_matrix": {
         "driver": "ws2812",
         "split_count": [18, 18]
@@ -21,8 +22,6 @@
         "rgb_matrix": true,
         "pointing_device": true
     },
-    "processor": "RP2040",
-    "bootloader": "rp2040",
     "layout_aliases": {
         "LAYOUT_charybdis_3x5": "LAYOUT"
     },

@@ -1,4 +1,3 @@
-// Copyright 2026 Quentin LEBASTARD <qlebastard@gmail.com> (@balanstik)
 // Copyright 2026 burkfers (@burkfers)
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -15,8 +14,3 @@
 /* Reset. */
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17
-
-#define SERIAL_USART_FULL_DUPLEX
-#define SERIAL_USART_TX_PIN GP1
-#define SERIAL_USART_RX_PIN GP12
-#define SERIAL_USART_PIN_SWAP
