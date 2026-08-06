@@ -1,6 +1,7 @@
-/*
- * Copyright 2021 Quentin LEBASTARD <qlebastard@gmail.com>
+/**
  * Copyright 2022 Charly Delay <charly@codesink.dev> (@0xcharly)
+ * Copyright 2023 casuanoob <casuanoob@hotmail.com> (@casuanoob)
+ * Copyright 2025 George Norton (@george-norton)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,16 +19,9 @@
 
 #pragma once
 
-/* Trackball angle adjustment. */
-#define ROTATIONAL_TRANSFORM_ANGLE -25
-
 /* Handedness. */
-// #define MASTER_RIGHT
-
-// To use the handedness pin, resistors need to be installed on the adapter PCB.
-// If so, uncomment the following code, and undefine MASTER_RIGHT above.
-// #define SPLIT_HAND_PIN GP15
-// #define SPLIT_HAND_PIN_LOW_IS_LEFT  // High -> right, Low -> left.
+#define SPLIT_HAND_PIN GP29
+#define SPLIT_HAND_PIN_LOW_IS_LEFT // High -> right, Low -> left.
 
 /* VBUS detection. */
 #define USB_VBUS_PIN GP19
@@ -37,20 +31,9 @@
 #define SPI_SCK_PIN GP22
 #define SPI_MISO_PIN GP20
 #define SPI_MOSI_PIN GP23
-#define POINTING_DEVICE_CS_PIN GP16
+#define POINTING_DEVICE_CS_PIN GP21 // legacy
 
 /* Reset. */
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17
-
-// Left-handed specific
-#undef POINTING_DEVICE_RIGHT
-#define POINTING_DEVICE_LEFT
-
-#undef POINTING_DEVICE_INVERT_X
-#define POINTING_DEVICE_INVERT_Y
-
-#undef ROTATIONAL_TRANSFORM_ANGLE
-#define ROTATIONAL_TRANSFORM_ANGLE -50
-
-#undef MASTER_RIGHT
+#define RP2040_BOOTLOADER_DOUBLE_TAP_RESET_TIMEOUT 500U
