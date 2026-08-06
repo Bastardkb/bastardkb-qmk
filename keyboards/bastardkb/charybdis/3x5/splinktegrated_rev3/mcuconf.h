@@ -1,5 +1,4 @@
 /*
- * Copyright 2021 Quentin LEBASTARD <qlebastard@gmail.com>
  * Copyright 2022 Charly Delay <charly@codesink.dev> (@0xcharly)
  *
  * This program is free software: you can redistribute it and/or modify
@@ -18,13 +17,7 @@
 
 #pragma once
 
-/* Trackball angle adjustment. */
-#define ROTATIONAL_TRANSFORM_ANGLE -25
+#include_next <mcuconf.h>
 
-/* Handedness. */
-#define MASTER_RIGHT
-
-// To use the handedness pin, resistors need to be installed on the adapter PCB.
-// If so, uncomment the following code, and undefine MASTER_RIGHT above.
-// #define SPLIT_HAND_PIN GP15
-// #define SPLIT_HAND_PIN_LOW_IS_LEFT  // High -> right, Low -> left.
+#undef RP_SPI_USE_SPI0
+#define RP_SPI_USE_SPI0 TRUE
