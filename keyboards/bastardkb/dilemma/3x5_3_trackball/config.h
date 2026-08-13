@@ -26,6 +26,9 @@
 /* VBUS detection. */
 #define USB_VBUS_PIN GP19
 
+#define ROTATIONAL_TRANSFORM_ANGLE 70
+#define POINTING_DEVICE_INVERT_X
+
 /* SPI & PMW3360 settings. */
 #define SPI_DRIVER SPID0
 #define SPI_SCK_PIN GP22
