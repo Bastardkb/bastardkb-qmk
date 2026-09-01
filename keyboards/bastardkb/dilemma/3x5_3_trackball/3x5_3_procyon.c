@@ -1,9 +1,11 @@
 /**
+ * Copyright 2020 Christopher Courtney <drashna@live.com> (@drashna)
+ * Copyright 2021 Quentin LEBASTARD <qlebastard@gmail.com>
  * Copyright 2022 Charly Delay <charly@codesink.dev> (@0xcharly)
- * Copyright 2025 George Norton (@george-norton)
+ * Copyright 2023 casuanoob <casuanoob@hotmail.com> (@casuanoob)
  *
  * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
+ * it under the terms of the GNU General Publicw License as published by
  * the Free Software Foundation, either version 2 of the License, or
  * (at your option) any later version.
  *
@@ -16,9 +18,4 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
-
-#define HAL_USE_SPI TRUE
-#define HAL_USE_I2C TRUE
-
-#include_next <halconf.h>
+#include "dilemma.h"
