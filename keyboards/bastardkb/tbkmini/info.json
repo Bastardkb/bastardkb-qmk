@@ -76,6 +76,7 @@
         }
     },
     "features": {
+        "caps_word": true,
         "bootmagic": true,
         "mousekey": true,
         "extrakey": true,
