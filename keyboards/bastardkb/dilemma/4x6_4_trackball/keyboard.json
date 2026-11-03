@@ -41,7 +41,9 @@
         "pointing_device": true,
         "caps_word": true,
         "tri_layer": true,
-        "digitizer": true
+        "digitizer": true,
+        "encoder": true,
+        "encoder_map": true
     },
     "ws2812": {
         "pin": "GP10",
