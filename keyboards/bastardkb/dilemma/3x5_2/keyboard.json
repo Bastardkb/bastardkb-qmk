@@ -5,6 +5,7 @@
         "pid": "0x1835"
     },
      "features": {
+        "caps_word": true,
         "bootmagic": true,
         "mousekey": true,
         "extrakey": true,
