@@ -42,3 +42,6 @@
 /* Reset. */
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17
+
+/* 4MB memory (not default) */
+#define EXTERNAL_FLASH_SIZE (4 * 1024 * 1024)
