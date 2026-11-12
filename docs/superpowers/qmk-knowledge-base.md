@@ -124,6 +124,13 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
 - `dprintf` only prints when `debug_config.enable` is set (`quantum/logging/debug.h`); use it for debug,
   `xprintf`/`print` for unconditional logging. `print`/`xprintf` output when `CONSOLE_ENABLE` is on,
   regardless of the debug flag.
+- For gate evidence that must appear without toggling the device debug flag, use `print`/`xprintf` (Phase 0
+  probe/echo did, 2026-11-12). `debug.h` already `#include`s `print.h`, so both are available from one include.
+- Slave-half console output reaching the master's `qmk console` depends on console relay and is not
+  guaranteed. When slave-side evidence is needed, have the master print the content the slave returned
+  over RPC (e.g. the echo buffer) rather than relying on the slave's own print lines.
+- `print`/`xprintf` are safe to call from the RPC slave callback (it runs in the serial thread context,
+  not an ISR).
 
 ## Keyboards / build target
 

@@ -6,10 +6,10 @@
 - **Module location:** `modules/bastardkb/bk_split_flash` in this local folder (the loader searches `modules/`, plural — earlier `module/` wording was a typo, confirmed 2026-11-12) — a standalone QMK Community Module. The human partner may move it (e.g. into external userspace) later.
 - **Target board:** `bastardkb/dilemma/4x6_4_procyon` (`vendor` keymap from userspace — confirmed 2026-11-12, see the Workflow contract; the measured `.uf2` in `.build/` is from this board) — the single board for all hardware validation.
 - **Build strategy:** standalone QMK Community Module enabled by listing it in `keymap.json`; zero edits to QMK core (§3). Three internal seams — trigger / transport / action — with a HAL boundary so the hardware-bound action and the host-testable protocol can be built in parallel.
-- **Status:** implementation in progress, Phase 0. 2026-11-12: module scaffold written
-  (`modules/bastardkb/bk_split_flash/`), build attempted, **build deferred** pending a workspace cleanup
-  by the human partner (see "Phase 0 execution log" below). The module is inert until listed in
-  `keymap.json`; QMK core is still untouched.
+- **Status:** Phase 0 **PASSED and complete** (2026-11-12): probe/echo round-trip verified on hardware
+  via `qmk console` (see "Phase 0 gate result" below); retrospective written and TLDR confirmed by the
+  user; plan updated. **Phase 1 is NOT started — the user will kick it off later.** The module is inert
+  unless listed in `keymap.json`; QMK core is still untouched.
 - **How to work on this plan:** read `docs/superpowers/phase-execution-instructions.md` at the start of
   each phase (ask-the-user rules, retrospective duties), and check `docs/superpowers/qmk-knowledge-base.md`
   **before** researching any QMK behaviour — add new findings there instead of re-researching.
@@ -299,7 +299,7 @@ Hardware verification is not executed by the agent: it is performed by the human
 
 **Build checks**
 
-- `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` with the module **not listed** and **listed** in `keymap.json`; confirm the `.uf2` stays well under `SPLIT_FLASH_MAX_IMAGE_SIZE` and `NUM_TOTAL_TRANSACTIONS <= 32` still passes with RPC enabled (`transaction_id_define.h:141`). This is the Phase 0 compile check.
+- `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` with the module **listed**; confirm the `.uf2` stays well under `SPLIT_FLASH_MAX_IMAGE_SIZE` and `NUM_TOTAL_TRANSACTIONS <= 32` passes with RPC enabled (`transaction_id_define.h:141`). **No per-phase flag-off control build** (decided 2026-11-12): all our code lives in `modules/bastardkb/bk_split_flash`, so "module not listed" simply means that folder is not compiled → stock by construction; a separate empty build adds nothing. Flag-off remains the documented rollback story in Phase 4, not a build to run.
 - Compile a board with `SPLIT_WATCHDOG_ENABLE` (e.g. `keyboards/keychron/q11/config.h:37`) to verify the guarded early return compiles.
 - Compile a board with `EE_HANDS` to confirm the compile-time assert fires with a clear message.
 - Confirm `qmk flash` and `util/uf2conv.py --deploy` behaviour is byte-for-byte unchanged (no diff to those files).
@@ -353,13 +353,28 @@ This applies to every phase in §13 and is the mechanism for working efficiently
 - **Phase 0 is also the process rehearsal.** It deliberately runs this whole loop once at the lowest possible cost. Its real output is twofold: it retires the phase-0 caveats, and it proves the workflow itself — that the checklist/gate instructions are clear enough that phases 1–5 can follow the same pattern without re-tuning. Phase 0 ends with a written retrospective that updates these plans (see Phase 0 below).
 - Phases 0–3 need the **seed flash** of the secondary once (per §11); the gate checklists state when to do it. Recovery (double-tap / manual UF2 on the secondary) stays available throughout.
 
+**Workflow refinements from the Phase 0 retrospective (confirmed by the user, 2026-11-12):**
+
+- **Phase UF2s must not depend on edits to the userspace `vendor` keymap** (it is user-owned). Temporary
+  test hooks/debug keycodes belong *inside the module build* (this repo) or the phase's own repo keymap,
+  added deliberately per phase — never as stray references in user-owned keymap files. (Phase 0 was
+  briefly blocked by a `BKSFTRG`/`BKSF_TEST_*` machinery in the userspace that no module defined; reverted
+  with approval.)
+- **Gate checklists state that probe/echo logs are unconditional** (`print`/`xprintf`, no device-debug
+  toggle needed) and that **the echoed packet content itself is the slave-side evidence** (a missing
+  slave-side "housekeeping on slave half" line is not a failure — console relay to the master may be off).
+- **Process:** max **2 different attempts** per objective, then stop, ELI5 what/why/what failed, and ask
+  the user for advice (see `phase-execution-instructions.md`, "Stuck / repeated attempts").
+- **No per-phase flag-off control builds** (all code lives in `modules/bastardkb/bk_split_flash`; module
+  absent = that folder not compiled = stock by construction). One-off run in Phase 0 confirmed it; retired.
+
 ## 13. Phase breakdown (one UF2 + validation gate each)
 
 Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4_procyon` and stops at the validation gate described below; the agent proceeds only on a PASS report from the human partner. UF2 names below are handover labels for that single `qmk compile` output.
 
 | Phase | Deliverable | UF2 artifact | Exit criterion |
 |---|---|---|---|
-| 0 — Walking skeleton / verify foundation | Standalone Community Module scaffold (`qmk_module.json`, `config.h`, `rules.mk`), one RPC ID, capability probe + echo in both directions, no flash writes; retire the caveats; rehearsal of the workflow | `bk_split_flash_phase0.uf2` | Compiles with the module enabled; `NUM_TOTAL_TRANSACTIONS <= 32` holds; probe/echo round-trips on both halves; checklist proven usable; plan updated after retrospective |
+| 0 — Walking skeleton / verify foundation | Standalone Community Module scaffold (`qmk_module.json`, `config.h`, `rules.mk`), one RPC ID, capability probe + echo in both directions, no flash writes; retire the caveats; rehearsal of the workflow | `bk_split_flash_phase0.uf2` | Compiles with the module enabled; `NUM_TOTAL_TRANSACTIONS <= 32` holds; probe/echo round-trips on both halves; checklist proven usable; plan updated after retrospective — **DONE 2026-11-12** |
 | 1 — Safety core | `bk_split_flash_flash.c`: staging erase/program, RAM-resident writer, boot2 arm/last-write, commit, CRC verify; HAL + native test harness; temporary on-device test hook | `bk_split_flash_phase1.uf2` | Power-cut matrix passes on one board; recovery yields a BOOTSEL drive every time |
 | 2 — Handshake | Capability/fingerprint probe, runtime CRC over own image, skip policy, one-shot guard | `bk_split_flash_phase2.uf2` | Old secondary skipped cleanly; identical fingerprints skip; no re-clone loop |
 | 3 — Transfer | Chunked numbered packets, CRC, ACK/NACK, retransmission, windowing, timeouts, watchdog pause, progress, both-halves wipe + reboot | `bk_split_flash_phase3.uf2` | Full 190 KiB clone completes within `SPLIT_FLASH_TRANSFER_TIMEOUT` on half-duplex |
@@ -403,39 +418,51 @@ What was done and confirmed:
 - Target id corrected to `bastardkb/dilemma/4x6_4_procyon`; phase builds use `-km vendor`
   (userspace keymap, which already lists the module and has `CONSOLE_ENABLE = yes`).
 
-Two external blockers found while compiling (confirm/cleanup before resuming):
+Two external blockers found while compiling (both resolved by the workspace cleanup, verified 2026-11-12):
 
 1. **Baseline ChibiOS HAL skew in this workspace — hits even `-km default`:**
-   `platforms/chibios/boards/common/configs/halconf.h:32` says `_CHIBIOS_HAL_CONF_VER_9_1_`, but
-   `lib/chibios/os/hal/include/hal.h:135` requires `_CHIBIOS_HAL_CONF_VER_8_4_`. Compile aborts with
-   `hal.h:136:40 #error "obsolete or unknown configuration file"`. Not module-related; the workspace
-   needs a cleanup / submodule refresh before any keymap for this board will build.
-2. **Userspace `vendor` keymap depends on the deleted userspace `bk_split_flash` compat shim.**
-   The userspace still lists `bastardkb/bk_pointing_device`, `bastardkb/argos`, `bastardkb/bk_led_matrix`
-   etc. in the vendor `keymap.json`/`config.h`. Those modules call `eeconfig_read_<mod>_datablock()` etc.,
-   whose declarations/definitions were previously supplied by the deleted userspace `bk_split_flash`
-   module's `post_config.h` + `bk_split_flash_compat.c` (a build-env shim, see
-   `qmk-knowledge-base.md` "eeconfig datablock shim"). Without it, GCC 15 rejects implicit declarations.
-   Fix options: (a) move/restore a tiny compat shim (new module or keep in userspace), or (b) userspace
-   cleanup drops/replaces those modules; agreed with user that this repo's `modules/` copy must build
-   independently of userspace state.
+   `platforms/chibios/boards/common/configs/halconf.h:32` said `_CHIBIOS_HAL_CONF_VER_9_1_` while
+   `lib/chibios/os/hal/include/hal.h:135` required `_CHIBIOS_HAL_CONF_VER_8_4_`. **RESOLVED:** after the
+   cleanup, both sides agree on `9_1` and the build passes the version gate at `hal.h:135-139`.
+2. **Userspace `vendor` keymap depended on a deleted userspace `bk_split_flash` compat shim.**
+   `bk_pointing_device.c` / `argos.c` previously needed `eeconfig_*_datablock()` shims supplied by the
+   deleted userspace `bk_split_flash` module. **RESOLVED:** those modules now compile clean without it.
+   A separate vendor-keymap issue blocked the build instead (see below) — fixed with the user's approval.
 
-Resume procedure:
+Resume procedure (completed 2026-11-12):
 
-- After the user's workspace cleanup, run `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`
-  (module listed via userspace `keymap.json`); then run the same with the module **not listed**
-  (flag-off control). Verify `NUM_TOTAL_TRANSACTIONS <= 32`, `.inc` presence, buffer sizes compile,
-  and no I2C `STATIC_ASSERT` (serial). Then proceed to the validation gate below.
+- `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` (module listed via userspace
+  `keymap.json`) **now builds and links successfully** → `bk_split_flash_phase0.uf2` (183,296 B,
+  ~179 KiB, well under `SPLIT_FLASH_MAX_IMAGE_SIZE`). Checks confirmed by the build + generated sources:
+  `NUM_TOTAL_TRANSACTIONS <= 32` (assert at `transaction_id_define.h:141` passed at link; RPC adds its
+  4 base IDs on top of the feature-rich board, still under the cap), `split_transaction_id_community_modules.inc`
+  contains `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH`, `SPLIT_TRANSACTION_RPC` auto-defined in
+  `community_post_config.h`, `RPC_M2S_BUFFER_SIZE` 246 / `RPC_S2M_BUFFER_SIZE` 16 compiled, serial
+  transport (no I2C `STATIC_ASSERT`). A one-off flag-off control build also passed (module absent =
+  stock); per-phase flag-off builds are retired (2026-11-12) — all code lives in the module folder.
 
-**Validation gate (what the human partner provides).** Flash the single Phase 0 UF2 to the primary; once, seed the secondary with the same UF2 (double-tap + manual UF2 drag, §11); connect **only the primary's USB**; open `qmk console`. Report back: the compile output (confirm no assert failures and the `NUM_TOTAL_TRANSACTIONS` value), and the console lines showing the probe and echoed packet from both halves, plus a PASS/FAIL.
+Vendor-keymap note (resolved with user approval, recommended option chosen): the userspace `vendor`
+keymap referenced a `BKSFTRG` custom keycode (`keymap.c:45`) with `BKSF_TEST_*` selectors
+(`config.h`) that no module defines. That test machinery was beyond Phase-0 scope (probe/echo only),
+so it was reverted: `BKSFTRG` → `KC_NO`, `BKSF_TEST_*` block removed. The build then succeeded.
 
-**Retrospective & plan update (end of Phase 0).** This phase is also the rehearsal, so after the PASS report the agent reflects before writing any Phase 1 code:
+**Validation gate (WHAT THE HUMAN PARTNER PROVIDES).** Flash the single Phase 0 UF2 to the primary; once, seed the secondary with the same UF2 (double-tap + manual UF2 drag, §11); connect **only the primary's USB**; open `qmk console`. Report back: the compile output (confirm no assert failures and the `NUM_TOTAL_TRANSACTIONS` value), and the console lines showing the probe and echoed packet from both halves, plus a PASS/FAIL.
 
-- write a short **self-reflection** — what went well, what went badly (both the module mechanics and the clarity of the instructions/checklist), ending in a **TLDR for the user**;
-- the human partner **confirms** the TLDR (and corrects anything wrong);
-- the agent then **updates these plans** — the Workflow contract, this checklist template, and the caveat list — so phases 1–5 can "continue in the same way" without re-tuning the process.
+**Phase 0 gate result (2026-11-12) — PASSED.** Primary flashed with `bk_split_flash_phase0.uf2`, secondary seeded once, only primary's USB connected, `qmk console`. Console showed the recurring (every ~500 ms) round-trip:
 
-Only after that update does Phase 1 start.
+```
+bk_split_flash: probe seq=255 -> echo seq=255 magic=0x5f version=1 status=0
+... (seq wrapping 244..2, echo always mirrors probe) ...
+```
+
+Reading: `seq` echoed byte-exact (RPC round-trip correct over the wire), `magic=0x5f` (`BK_SPLIT_FLASH_MAGIC`), `version=1` (`BK_SPLIT_FLASH_PROTOCOL_VERSION`), `status=0` (`BK_SPLIT_FLASH_STATUS_OK`); seq step ~−11 per line = the 500 ms cadence (`500 mod 256 = 244`, wrap normal); no `probe failed` lines. This verifies caveats #4/#5/#8 (module `.inc`/RPC wiring, both-half hooks, probe/echo on half-duplex vendor serial). Compile-time checks (caveats #1/#2/#3/#6) held at link. **PASS.**
+
+**Retrospective & plan update (DONE 2026-11-12).** Outcomes folded into the Workflow contract and checklist below:
+
+- Retrospective: what went well — module mechanics proven end-to-end with zero QMK core edits; both historical blockers cleared by the cleanup; the fixed `-km vendor` target behaved as documented. What went badly — the agent over-rotated extracting one already-proven integer (`NUM_TOTAL_TRANSACTIONS <= 32`) through ~5 avenues (a successful link is the proof); one unplanned Q&A for out-of-band test machinery in the userspace keymap; `dprintf` (debug-gated) would have made the gate silent until switched to unconditional `print`/`xprintf`.
+- **TLDR (confirmed by the user):** Phase 0 works — module builds here, probe/echo round-trips cleanly on both halves, no QMK core edits, two stale blockers cleared. Process lesson: don't over-rotate on numbers the build already proved; future phase UF2s must stay independent of the userspace keymap's throwaway test keys.
+
+Only after that update does Phase 1 start (Phase 1 kickoff is held for the user).
 
 ### Phase 1 — Safety core
 
@@ -459,7 +486,7 @@ Add chunked numbered packets, packet CRC, ACK/NACK, bounded retransmission, opti
 
 Finalize all config knobs and compile-time asserts (§3), the module README, board docs, seed-flash and recovery instructions, and confirm flag-off (module not listed) = byte-for-byte stock. This is the first **release candidate** UF2.
 
-**Validation gate:** with the single Phase 4 UF2, confirm `qmk flash`, QMK Toolbox, and a manual UF2 drag all work; confirm the flag-off build is stock; confirm that if both halves' USB are connected, `uf2conv.py` flashes both and the clone skips (no duplicate work). Provide the observations and PASS/FAIL.
+**Validation gate:** with the single Phase 4 UF2, confirm `qmk flash`, QMK Toolbox, and a manual UF2 drag all work; confirm the flag-off story (module removed = stock, guaranteed by the module-folder isolation — no control build, decided 2026-11-12); confirm that if both halves' USB are connected, `uf2conv.py` flashes both and the clone skips (no duplicate work). Provide the observations and PASS/FAIL.
 
 ### Phase 5 — Optional tuning
 

@@ -26,6 +26,17 @@ phase ends (retrospective + plan update).
   finding to the user, ask to confirm, and modify the plan on the go **only after they agree**.
 - A plan is a working contract, not a straitjacket. Changing it after asking is normal and welcome.
 
+## Stuck / repeated attempts — stop and talk
+
+- If you try to accomplish the **same thing** two different ways and neither worked, **stop**. Do
+  not keep switching approaches on your own.
+- Explain ELI5: what you're trying to do, why, and the approaches you already tried and why each
+  failed. Ask the user for advice or a recommended path before continuing.
+- Two attempts is the limit for one objective within a single stretch of work. If a genuinely new
+  idea arrives after asking, that is a fresh attempt with the user's blessing, not a silent third try.
+- This keeps effort focused and avoids burning time on one problem in ever-shifting ways (e.g. five
+  flavours of getting the same number out of a build).
+
 ## Keeping the plan in sync
 
 - Update the plan file as decisions are made: e.g. correct typos, note deviations, retire caveats,
