@@ -5,8 +5,8 @@
 - **Size:** Project-sized (a new opt-in module with a safety-critical write path), not a small change.
 - **Skill:** `skills/brainstorm.md` (approaches laid out and picked in earlier conversation; this is the written design).
 - **Implementation plan:** `docs/superpowers/plans/2026-11-12-split-secondary-flash-implementation.md`
-- **Module location (provisional):** `module/bastardkb/bk_split_flash` in this local folder; the human partner may move it (e.g. into external userspace) later.
-- **Target board:** `bastardkb/dilemma/4x6_4/procyon` (all hardware validation happens here).
+- **Module location:** `modules/bastardkb/bk_split_flash` in this local folder (the loader searches `modules/`, plural — earlier `module/` wording was a typo, confirmed 2026-11-12); the human partner may move it (e.g. into external userspace) later.
+- **Target board:** `bastardkb/dilemma/4x6_4_procyon` (`vendor` keymap from userspace, confirmed 2026-11-12; all hardware validation happens here).
 - **Build strategy:** a standalone QMK Community Module — enabled by listing it in `keymap.json`, inert otherwise — with no edits to QMK core (the plan maps every former core edit to a module hook).
 - **Workflow:** phased; each phase emits exactly one UF2 and ends at a human validation gate. No phase's coding starts until the previous gate is validated by the human partner.
 
@@ -86,7 +86,7 @@ Picked by the human partner across earlier rounds. Not reopened.
 ## Build & validation workflow (added 2026-11-12)
 
 - The implementation is a standalone QMK Community Module, so "packaging" is not a single late phase: a minimal scaffold (`qmk_module.json`, `config.h`, `rules.mk`) exists from Phase 0, and Phase 4 finalizes it. The seams (trigger / transport / action) let the hardware-bound flash writer and the host-testable protocol/state-machine be developed in parallel.
-- **One UF2 per phase.** Every phase produces exactly one self-contained UF2 for `bastardkb/dilemma/4x6_4/procyon` (any temporary test harness — a debug keycode or forced trigger — lives inside that image), so validation needs a single image and a single flash.
+- **One UF2 per phase.** Every phase produces exactly one self-contained UF2 for `bastardkb/dilemma/4x6_4_procyon` (any temporary test harness — a debug keycode or forced trigger — lives inside that image), so validation needs a single image and a single flash.
 - **A validation gate ends every phase.** Because flashing and power-cut testing need the physical board, the agent hands the human partner the UF2 plus an exact checklist (cable setup, seed state, the flash command, the console/LED/BOOTSEL observations to make, and what to report back) and does **not** begin the next phase until the human partner reports validation. The precise per-gate contents live in the implementation plan.
 - **No coding yet.** These docs are planning only; implementation starts only after the revised plan is approved and then proceeds gate-by-gate.
 

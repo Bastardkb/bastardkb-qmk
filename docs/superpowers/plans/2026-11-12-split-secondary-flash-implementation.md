@@ -3,8 +3,8 @@
 - **Date:** 2026-11-12
 - **Design doc:** `docs/superpowers/specs/2026-11-12-split-secondary-flash-design.md` (approved 2026-11-12; extended 2026-11-12 with the phased build & validation workflow)
 - **Scope:** firmware-only. No host script, no CLI changes, no changes to `util/uf2conv.py`, `platforms/chibios/flash.mk`, or `lib/python/qmk/`.
-- **Module location (provisional):** `module/bastardkb/bk_split_flash` in this local folder — a standalone QMK Community Module. The human partner may move it (e.g. into external userspace) later. QMK's loader discovers modules under `modules/` (plural, e.g. `modules/qmk/split_data_sync`); confirming discoverability/enablement from the provisional path is a Phase 0 check.
-- **Target board:** `bastardkb/dilemma/4x6_4/procyon` (`default` keymap; the measured `.uf2` in `.build/` is from this board) — the single board for all hardware validation.
+- **Module location:** `modules/bastardkb/bk_split_flash` in this local folder (the loader searches `modules/`, plural — earlier `module/` wording was a typo, confirmed 2026-11-12) — a standalone QMK Community Module. The human partner may move it (e.g. into external userspace) later.
+- **Target board:** `bastardkb/dilemma/4x6_4_procyon` (`vendor` keymap from userspace — confirmed 2026-11-12, see the Workflow contract; the measured `.uf2` in `.build/` is from this board) — the single board for all hardware validation.
 - **Build strategy:** standalone QMK Community Module enabled by listing it in `keymap.json`; zero edits to QMK core (§3). Three internal seams — trigger / transport / action — with a HAL boundary so the hardware-bound action and the host-testable protocol can be built in parallel.
 - **Status:** implementation plan, not yet implemented, and **planning only for now** (no coding). Restructured 2026-11-12 into Phase 0–5; each phase emits exactly one UF2 and ends at a human validation gate (see the Workflow contract and §13). Implementation starts only after the revised plan is approved, then proceeds gate-by-gate.
 
@@ -91,7 +91,7 @@ Measured in-tree; these are why the plan needs no QMK core edits.
 New folder, isolated, following `modules/qmk/split_data_sync/`:
 
 ```
-module/bastardkb/bk_split_flash/
+modules/bastardkb/bk_split_flash/
     qmk_module.json            module_name, maintainer, license; ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1,1,2)
     config.h                   SPLIT_TRANSACTION_IDS_MODULE_*, RPC_*_BUFFER_SIZE, config knobs, compile-time asserts
     rules.mk                   SRC += bk_split_flash_flash.c; any pico-sdk flash include paths
@@ -293,7 +293,7 @@ Hardware verification is not executed by the agent: it is performed by the human
 
 **Build checks**
 
-- `qmk compile -kb bastardkb/dilemma/4x6_4/procyon -km default` with the module **not listed** and **listed** in `keymap.json`; confirm the `.uf2` stays well under `SPLIT_FLASH_MAX_IMAGE_SIZE` and `NUM_TOTAL_TRANSACTIONS <= 32` still passes with RPC enabled (`transaction_id_define.h:141`). This is the Phase 0 compile check.
+- `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` with the module **not listed** and **listed** in `keymap.json`; confirm the `.uf2` stays well under `SPLIT_FLASH_MAX_IMAGE_SIZE` and `NUM_TOTAL_TRANSACTIONS <= 32` still passes with RPC enabled (`transaction_id_define.h:141`). This is the Phase 0 compile check.
 - Compile a board with `SPLIT_WATCHDOG_ENABLE` (e.g. `keyboards/keychron/q11/config.h:37`) to verify the guarded early return compiles.
 - Compile a board with `EE_HANDS` to confirm the compile-time assert fires with a clear message.
 - Confirm `qmk flash` and `util/uf2conv.py --deploy` behaviour is byte-for-byte unchanged (no diff to those files).
@@ -322,7 +322,20 @@ Hardware verification is not executed by the agent: it is performed by the human
 
 This applies to every phase in §13 and is the mechanism for working efficiently with hardware the agent cannot touch.
 
-- **One UF2 per phase.** Each phase delivers exactly **one** self-contained UF2 for `bastardkb/dilemma/4x6_4/procyon`, produced by `qmk compile -kb bastardkb/dilemma/4x6_4/procyon -km default` (copied from `.build/` and given a phase label for handover). Any temporary test harness (a debug keycode, a forced opcode, a canned image) is compiled into that same image, so validation never needs a second image or a host tool. No other flashable artifacts are produced mid-phase.
+- **Process rehearsal first.** Before each phase, read `docs/superpowers/phase-execution-instructions.md`
+  (phase start checklist, ask-the-user rule, retrospective/plan-update duties) and check
+  `docs/superpowers/qmk-knowledge-base.md` before researching anything QMK. Extend the knowledge base with
+  new findings instead of re-researching.
+- **One UF2 per phase.** Each phase delivers exactly **one** self-contained UF2 for
+  `bastardkb/dilemma/4x6_4_procyon`, produced by `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`
+  (confirmed 2026-11-12: the board's real image is the userspace `vendor` keymap, which already lists the
+  module and has `CONSOLE_ENABLE = yes`; the in-tree `default` keymap is a bare C keymap with no
+  `keymap.json`, so it is not used for phase UF2s). Copied from `.build/` and given a phase label for
+  handover. Any temporary test harness (a debug keycode, a forced opcode, a canned image) is compiled into
+  that same image, so validation never needs a second image or a host tool. No other flashable artifacts are
+  produced mid-phase.
+- **Module location:** `modules/bastardkb/bk_split_flash/` (plural `modules/`; the plan's `module/` wording
+  was a typo — the loader only searches `modules/`).
 - **Each phase ends at a human validation gate.** Flashing and power-cut testing require the physical board, so the agent cannot self-verify them. At the gate the agent provides the UF2 plus an exact checklist and **stops**: no coding for the next phase begins until the human partner reports the result.
 - **What the agent hands over at every gate** (spelled out per phase in §13):
   1. the single UF2 (path/name) and the exact build/flash command;
@@ -336,7 +349,7 @@ This applies to every phase in §13 and is the mechanism for working efficiently
 
 ## 13. Phase breakdown (one UF2 + validation gate each)
 
-Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4/procyon` and stops at the validation gate described below; the agent proceeds only on a PASS report from the human partner. UF2 names below are handover labels for that single `qmk compile` output.
+Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4_procyon` and stops at the validation gate described below; the agent proceeds only on a PASS report from the human partner. UF2 names below are handover labels for that single `qmk compile` output.
 
 | Phase | Deliverable | UF2 artifact | Exit criterion |
 |---|---|---|---|
@@ -357,7 +370,7 @@ Caveats retired in this phase (each a compile- or console-check in the Phase 0 b
 
 1. `NUM_TOTAL_TRANSACTIONS <= 32` still passes with the module (RPC's 4 base IDs + 1 module ID).
 2. `RPC_M2S_BUFFER_SIZE` / `RPC_S2M_BUFFER_SIZE` override builds cleanly, `split_shared_memory_t` fits, I2C `STATIC_ASSERT` not triggered (serial).
-3. Module discovery/enablement works from the provisional `module/bastardkb/bk_split_flash` path (QMK loader expects `modules/` plural — confirm or note the move).
+3. Module discovery/enablement works from the provisional `modules/bastardkb/bk_split_flash` path (the loader expects `modules/` plural — the earlier `module/` wording was a typo; confirmed working in Phase 0).
 4. `SPLIT_TRANSACTION_IDS_MODULE_*` → `.inc` generation and `SPLIT_TRANSACTION_RPC` auto-define work.
 5. `housekeeping_task_<mod>()` fires on **both** halves; `keyboard_post_init_<mod>()` registration runs on both halves.
 6. `ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1,1,2)` passes.
@@ -434,7 +447,7 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 - Whether the wipe should be `eeconfig_init()` only or also a raw erase of the 8192-byte wear-leveling backing region (`wear_leveling_rp2040_flash_config.h:16`).
 - Initial chunk size on half-duplex (start 64–128 B given `serial_usart.c:114-143` FIFO notes, tune upward).
 - Whether to expose `SPLIT_FLASH_FORCE` publicly or keep it debug-only.
-- ~~Which board enables the flag first~~ — **fixed**: `bastardkb/dilemma/4x6_4/procyon` is the single test board for all phases (a measured `.uf2` already exists in `.build/`).
+- ~~Which board enables the flag first~~ — **fixed**: `bastardkb/dilemma/4x6_4_procyon` is the single test board for all phases (a measured `.uf2` already exists in `.build/`).
 - Whether to add a `-bl uf2-split-both` make target later (would need only a few lines in `platforms/chibios/flash.mk`, no Python change) — explicitly deferred, not required.
 
 ## 16. Out of scope
@@ -446,4 +459,6 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 - Flashing the secondary through its own USB.
 - SWD-based programming or hardware changes (extra TRRS conductors, USB hub/mux, reset line).
 - Per-half different UF2 images (`uf2-split-left`/`uf2-split-right`, `flash.mk:50-64`) — unnecessary without `EE_HANDS`.
+- Supporting `EE_HANDS` boards.
+ `flash.mk:50-64`) — unnecessary without `EE_HANDS`.
 - Supporting `EE_HANDS` boards.

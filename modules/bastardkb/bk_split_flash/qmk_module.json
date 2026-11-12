@@ -1,0 +1,9 @@
+{
+    "module_name": "Split flash",
+    "maintainer": "bastardkb",
+    "license": "GPL-2.0-or-later",
+    "url": "https://github.com/bastardkb",
+    "features": {
+        "console": true
+    }
+}
