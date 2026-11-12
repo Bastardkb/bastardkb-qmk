@@ -365,6 +365,13 @@ This applies to every phase in §13 and is the mechanism for working efficiently
   slave-side "housekeeping on slave half" line is not a failure — console relay to the master may be off).
 - **Process:** max **2 different attempts** per objective, then stop, ELI5 what/why/what failed, and ask
   the user for advice (see `phase-execution-instructions.md`, "Stuck / repeated attempts").
+- **Ask for evidence/scope, don't guess:** when in doubt, ask the user a question that surfaces raw
+  evidence or clarifies scope rather than proceeding on an assumption
+  (`phase-execution-instructions.md`, "Ask the user — don't assume").
+- **Consume-only evidence + proved-by-construction:** gate checklists ask only for evidence a decision
+  uses; a passed compile-time assert is already proof (don't re-derive). Verify observability (e.g. in
+  `qmk console`, no hidden debug toggle) before each gate
+  (`phase-execution-instructions.md`, "Gate evidence & checklists").
 - **No per-phase flag-off control builds** (all code lives in `modules/bastardkb/bk_split_flash`; module
   absent = that folder not compiled = stock by construction). One-off run in Phase 0 confirmed it; retired.
 

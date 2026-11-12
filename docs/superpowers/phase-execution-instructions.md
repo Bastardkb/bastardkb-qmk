@@ -25,6 +25,9 @@ phase ends (retrospective + plan update).
 - If while implementing you find something that could be better or differs from the plan, ELI5 the
   finding to the user, ask to confirm, and modify the plan on the go **only after they agree**.
 - A plan is a working contract, not a straitjacket. Changing it after asking is normal and welcome.
+- **When in doubt, ask a question that unblocks the next decision — request evidence or clarify scope.**
+  Examples: "paste the exact raw console/build output", or "is doing X part of this phase's scope, or
+  yours to handle?" Do not proceed on a guess when the answer would change the work.
 
 ## Stuck / repeated attempts — stop and talk
 
@@ -36,6 +39,19 @@ phase ends (retrospective + plan update).
   idea arrives after asking, that is a fresh attempt with the user's blessing, not a silent third try.
 - This keeps effort focused and avoids burning time on one problem in ever-shifting ways (e.g. five
   flavours of getting the same number out of a build).
+
+## Gate evidence & checklists — build efficiency
+
+- **Consume-only evidence.** A gate checklist should ask only for evidence a downstream decision or the
+  validation actually uses. Don't request a value/number just because it *feels* required.
+- **Proved-by-construction.** If a constraint is enforced by a passed compile-time gate (`STATIC_ASSERT`,
+  `#error`, a linker error), it is already proven by a successful build. Do not spend effort re-deriving
+  or "extracting" its value unless a downstream consumer needs it (e.g. Phase 0's `NUM_TOTAL_TRANSACTIONS
+  <= 32` was proven at link; the exact integer was not consumed by anything).
+- **Verify observability before the gate, not at it.** Before handing over a gate, confirm the expected
+  evidence actually appears in the intended channel (e.g. `qmk console`) with no hidden toggle. If a
+  message needs device debug enabled, either switch to unconditional logging (`print`/`xprintf`) or state
+  the toggle explicitly in the checklist.
 
 ## Keeping the plan in sync
 
