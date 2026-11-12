@@ -6,7 +6,13 @@
 - **Module location:** `modules/bastardkb/bk_split_flash` in this local folder (the loader searches `modules/`, plural — earlier `module/` wording was a typo, confirmed 2026-11-12) — a standalone QMK Community Module. The human partner may move it (e.g. into external userspace) later.
 - **Target board:** `bastardkb/dilemma/4x6_4_procyon` (`vendor` keymap from userspace — confirmed 2026-11-12, see the Workflow contract; the measured `.uf2` in `.build/` is from this board) — the single board for all hardware validation.
 - **Build strategy:** standalone QMK Community Module enabled by listing it in `keymap.json`; zero edits to QMK core (§3). Three internal seams — trigger / transport / action — with a HAL boundary so the hardware-bound action and the host-testable protocol can be built in parallel.
-- **Status:** implementation plan, not yet implemented, and **planning only for now** (no coding). Restructured 2026-11-12 into Phase 0–5; each phase emits exactly one UF2 and ends at a human validation gate (see the Workflow contract and §13). Implementation starts only after the revised plan is approved, then proceeds gate-by-gate.
+- **Status:** implementation in progress, Phase 0. 2026-11-12: module scaffold written
+  (`modules/bastardkb/bk_split_flash/`), build attempted, **build deferred** pending a workspace cleanup
+  by the human partner (see "Phase 0 execution log" below). The module is inert until listed in
+  `keymap.json`; QMK core is still untouched.
+- **How to work on this plan:** read `docs/superpowers/phase-execution-instructions.md` at the start of
+  each phase (ask-the-user rules, retrospective duties), and check `docs/superpowers/qmk-knowledge-base.md`
+  **before** researching any QMK behaviour — add new findings there instead of re-researching.
 
 ## 1. What this implements, in one flow
 
@@ -374,8 +380,52 @@ Caveats retired in this phase (each a compile- or console-check in the Phase 0 b
 4. `SPLIT_TRANSACTION_IDS_MODULE_*` → `.inc` generation and `SPLIT_TRANSACTION_RPC` auto-define work.
 5. `housekeeping_task_<mod>()` fires on **both** halves; `keyboard_post_init_<mod>()` registration runs on both halves.
 6. `ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1,1,2)` passes.
-7. Watchdog: confirm `split_watchdog_update()` / `split_watchdog_init()` can keep the slave fed; decide whether the one guarded core line is needed.
+7. Watchdog: call `split_watchdog_update(true)` from the module's housekeeping while busy; confirm this
+   keeps the slave fed without a core edit. Verified 2026-11-12: **`split_watchdog_init()` is NOT public**
+   (only `split_watchdog_update(bool)` is declared in `split_util.h`); `init` is called internally under
+   `SPLIT_WATCHDOG_ENABLE`, so the module must not call it. Pausing the reset needs only
+   `split_watchdog_update(true)` — no guarded core line required.
 8. Probe/echo round-trips over the half-duplex vendor serial with the seed image on the secondary.
+
+### Phase 0 execution log (2026-11-12) — build deferred, workspace cleanup first
+
+Written by the agent during Phase 0 so resumption is unambiguous. **Module scaffold IS written and
+reviewed; the compile did not complete** — blocked by two external factors, both outside the module.
+
+What was done and confirmed:
+
+- `modules/bastardkb/bk_split_flash/` scaffold exists: `qmk_module.json`, `config.h`,
+  `rules.mk`, `bk_split_flash.h`, `bk_split_flash.c`; mirrors `modules/qmk/split_data_sync/`.
+  `config.h` declares `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH PUT_BK_SPLIT_FLASH` and sets
+  `RPC_M2S_BUFFER_SIZE`/`RPC_S2M_BUFFER_SIZE` (246/16).
+- The build generated `split_transaction_id_community_modules.inc` and `community_post_config.h`
+  successfully — caveat #4 wiring is alive (module discovery + `.inc` + `SPLIT_TRANSACTION_RPC`).
+- Target id corrected to `bastardkb/dilemma/4x6_4_procyon`; phase builds use `-km vendor`
+  (userspace keymap, which already lists the module and has `CONSOLE_ENABLE = yes`).
+
+Two external blockers found while compiling (confirm/cleanup before resuming):
+
+1. **Baseline ChibiOS HAL skew in this workspace — hits even `-km default`:**
+   `platforms/chibios/boards/common/configs/halconf.h:32` says `_CHIBIOS_HAL_CONF_VER_9_1_`, but
+   `lib/chibios/os/hal/include/hal.h:135` requires `_CHIBIOS_HAL_CONF_VER_8_4_`. Compile aborts with
+   `hal.h:136:40 #error "obsolete or unknown configuration file"`. Not module-related; the workspace
+   needs a cleanup / submodule refresh before any keymap for this board will build.
+2. **Userspace `vendor` keymap depends on the deleted userspace `bk_split_flash` compat shim.**
+   The userspace still lists `bastardkb/bk_pointing_device`, `bastardkb/argos`, `bastardkb/bk_led_matrix`
+   etc. in the vendor `keymap.json`/`config.h`. Those modules call `eeconfig_read_<mod>_datablock()` etc.,
+   whose declarations/definitions were previously supplied by the deleted userspace `bk_split_flash`
+   module's `post_config.h` + `bk_split_flash_compat.c` (a build-env shim, see
+   `qmk-knowledge-base.md` "eeconfig datablock shim"). Without it, GCC 15 rejects implicit declarations.
+   Fix options: (a) move/restore a tiny compat shim (new module or keep in userspace), or (b) userspace
+   cleanup drops/replaces those modules; agreed with user that this repo's `modules/` copy must build
+   independently of userspace state.
+
+Resume procedure:
+
+- After the user's workspace cleanup, run `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`
+  (module listed via userspace `keymap.json`); then run the same with the module **not listed**
+  (flag-off control). Verify `NUM_TOTAL_TRANSACTIONS <= 32`, `.inc` presence, buffer sizes compile,
+  and no I2C `STATIC_ASSERT` (serial). Then proceed to the validation gate below.
 
 **Validation gate (what the human partner provides).** Flash the single Phase 0 UF2 to the primary; once, seed the secondary with the same UF2 (double-tap + manual UF2 drag, §11); connect **only the primary's USB**; open `qmk console`. Report back: the compile output (confirm no assert failures and the `NUM_TOTAL_TRANSACTIONS` value), and the console lines showing the probe and echoed packet from both halves, plus a PASS/FAIL.
 
@@ -424,14 +474,14 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 | 255-byte transaction cap vs "big packages" | Accept; multiplexed chunks. Document as a framework limit, not a design flaw. Only a `uint16_t` core change or a custom transport would beat it — both out of scope for "SIMPLE" |
 | 32-ID budget nearly full (RPC adds 4 base IDs) | Verify `NUM_TOTAL_TRANSACTIONS` with a real compile in Phase 0; trim other split sync features or make the single guarded core edit if it trips |
 | RPC transport footprint (4 base IDs, 4-phase handshake) | Retire the ID budget in Phase 0; compensate with windowed ACKs / chunk tuning (§10) |
-| Module discovery from provisional `module/bastardkb/bk_split_flash` (loader expects `modules/`) | Phase 0 confirms enablement or records the move |
-| Watchdog pause without a core edit | Public `split_watchdog_update()` / `split_watchdog_init()`; Phase 0 confirms, else the one guarded core line |
+| Module discovery from provisional `module/bastardkb/bk_split_flash` (loader expects `modules/`) | **Retired 2026-11-12**: `module/` was a typo; the module lives at `modules/bastardkb/bk_split_flash` and was confirmed discoverable (`.inc` generated in the Phase 0 build attempt) |
+| Watchdog pause without a core edit | **Retired 2026-11-12**: only public `split_watchdog_update(bool)` is needed to pause the reset; `split_watchdog_init()` is internal. No core edit required (see Phase 0 caveat 7 / knowledge base) |
 | Self-replication loop | Fingerprint equality → skip; one-shot per-boot guard; no EEPROM state (which is wiped) |
 | Trigger fragility | Runtime CRC comparison, not `.ram0` sticky note (`rp2040.c:32`) |
 | Copying wrong bytes | Bound by `__flash_binary_end`; exclude EEPROM region; magic header + length + CRC before commit |
 | Version coupling | Intended — no `EE_HANDS`, one image for both halves; compile-time assert prevents enabling on an `EE_HANDS` board |
 | Brick / power loss | Arm boot2 → stage → verify → commit → boot2 last; ROM auto-BOOTSEL on any interruption; double-tap hatch |
-| Watchdog reset mid-write | Feed/refresh via public `split_watchdog_update()` / `split_watchdog_init()` from the module's housekeeping loop; Phase 0 confirms, else the one guarded core line |
+| Watchdog reset mid-write | Feed/refresh via the public `split_watchdog_update(true)` from the module's housekeeping loop (verified public; `split_watchdog_init()` is internal — see knowledge base); no core edit |
 | Silent 20–40 s freeze | Bounded global timeout, visible progress, no blocking of primary boot |
 | Slave reboot disappearing | Primary tolerates it; no blocking wait |
 | EEPROM wipe wiping state the module needs | Module keeps no EEPROM state; fingerprint is the persistent state |
@@ -441,24 +491,27 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 
 ## 15. Open technical decisions for the implementer
 
-- **The Phase 0 walking skeleton retires (not defers) the architectural caveats:** the 32-ID budget under RPC, RPC buffer sizing, module discovery from the provisional `module/bastardkb/bk_split_flash` path (loader expects `modules/` plural), and whether the watchdog pause needs the one guarded core edit.
+- **The Phase 0 walking skeleton retires (not defers) the architectural caveats:** the 32-ID budget under RPC, RPC buffer sizing, module discovery from the `modules/bastardkb/bk_split_flash` path (loader expects `modules/` plural — `module/` wording was a typo), and the watchdog pause (needs only the public `split_watchdog_update(bool)`, no core edit). These were confirmed in the Phase 0 build attempt / knowledge base on 2026-11-12.
+- **Phase 0 board id/keymap fixed:** `bastardkb/dilemma/4x6_4_procyon` (underscore) is the single test board; phase builds use `-km vendor` (userspace keymap, already lists the module + console on).
 - Exact staging offset and whether to reserve a second slot for A/B redundancy (the design uses one slot + arming; a second slot would shrink the danger window further at the cost of complexity — recommended: **one slot**, keep it simple).
 - CRC width and polynomial (reuse the QMK CRC helpers already used at `transactions.c:150`).
 - Whether the wipe should be `eeconfig_init()` only or also a raw erase of the 8192-byte wear-leveling backing region (`wear_leveling_rp2040_flash_config.h:16`).
 - Initial chunk size on half-duplex (start 64–128 B given `serial_usart.c:114-143` FIFO notes, tune upward).
 - Whether to expose `SPLIT_FLASH_FORCE` publicly or keep it debug-only.
-- ~~Which board enables the flag first~~ — **fixed**: `bastardkb/dilemma/4x6_4_procyon` is the single test board for all phases (a measured `.uf2` already exists in `.build/`).
 - Whether to add a `-bl uf2-split-both` make target later (would need only a few lines in `platforms/chibios/flash.mk`, no Python change) — explicitly deferred, not required.
 
 ## 16. Out of scope
 
 - Any host-side script, CLI subcommand, or USB protocol.
-- Editing QMK core files — the standalone module needs none (the watchdog pause may be the single exception if Phase 0 shows the public hooks are insufficient).
+- Editing QMK core files - the standalone module needs none (verified 2026-11-12: the watchdog pause
+  needs only the public `split_watchdog_update(bool)`, no core edit).
 - Starting any phase's coding before that phase's validation gate has been validated by the human partner.
-- ~~`SPLIT_TRANSACTION_IDS_KB`/RPC-based implementation~~ — **now in scope**: RPC via `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH` is the standalone module's only way to register a transaction without editing QMK core. The "one multiplexed ID with an opcode" intent (§6) is retained; the 32-ID budget under RPC is a Phase 0 check.
+- ~~`SPLIT_TRANSACTION_IDS_KB`/RPC-based implementation~~ - **now in scope**: RPC via
+  `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH` is the standalone module's only way to register a
+  transaction without editing QMK core. The "one multiplexed ID with an opcode" intent is retained; the
+  32-ID budget under RPC is a Phase 0 check.
 - Flashing the secondary through its own USB.
 - SWD-based programming or hardware changes (extra TRRS conductors, USB hub/mux, reset line).
-- Per-half different UF2 images (`uf2-split-left`/`uf2-split-right`, `flash.mk:50-64`) — unnecessary without `EE_HANDS`.
-- Supporting `EE_HANDS` boards.
- `flash.mk:50-64`) — unnecessary without `EE_HANDS`.
+- Per-half different UF2 images (`uf2-split-left`/`uf2-split-right`, `flash.mk:50-64`) - unnecessary
+  without `EE_HANDS`.
 - Supporting `EE_HANDS` boards.
