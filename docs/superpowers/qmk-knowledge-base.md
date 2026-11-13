@@ -142,6 +142,53 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   keymap with no `keymap.json`. Phase UF2s are built with `-km vendor` (user-confirmed 2026-11-12) so the
   module is already listed + console is on.
 
+## RP2040 flash self-write (learned 2026-11-13, Phase 1 safety core)
+
+- **pico-sdk primitives:** `flash_range_erase` / `flash_range_program` (`lib/pico-sdk/.../hardware_flash/flash.c`)
+  are already `__no_inline_not_in_flash_func` (RAM), copy boot2 to RAM before exiting XIP and re-enter XIP
+  via that copy. `hardware_flash/flash.c` is in `PICOSDKSRC` (RP2040.mk), so the module can call them
+  directly — no need to re-implement the boot2/XIP dance (the plan's "pattern in
+  `wear_leveling_rp2040_flash.c`" is exactly what these primitives do).
+- **Requirements when calling them:** interrupts disabled (`save_and_disable_interrupts`/`restore_interrupts`
+  are static inline in `hardware/sync.h` — no link dependency though `hardware_sync/sync.c` is NOT in
+  PICOSDKSRC); the `data` buffer passed to `flash_range_program` must be in RAM; `flash_range_program`
+  offset must be 256-byte aligned and `count` a multiple of 256; `flash_range_erase` offset/count must be
+  4 KiB sector aligned (64 KiB block rounding is handled by the bootrom — procyon is single-core
+  `CRT0_EXTRA_CORES_NUMBER=0`, so no core 1 concern).
+- **Callers may stay in flash** (XIP is re-enabled between each op); only code executing *during* an op
+  must be RAM-resident. Exception: if the active region is being erased/rewritten, the loop between ops
+  must ALSO be RAM (its own code is in the erased region). `bk_split_flash_commit` is therefore
+  `__no_inline_not_in_flash_func` (→ `.time_critical.*` → RAM `.data`) and must not call memcpy/print/etc.
+  The linker may emit a flash `*_veneer` stub for cross-TU calls into it — harmless (runs with XIP up).
+- **Vector-table hazard:** `crt0_v6m.S` sets VTOR to `_vectors` in **flash** (sector 0). Erasing sector 0
+  while running = next IRQ fetches `0xFF` → hard fault. Hence the module erases sector 0 only inside the
+  interrupts-off commit (the approved §4 arm-at-commit-start change).
+- **Linker symbols:** `__flash_binary_start`/`__flash_binary_end`/`__boot2_start__` from
+  `RP2040_FLASH_TIMECRIT.ld`. Image length = `&__flash_binary_end - XIP_BASE`.
+- **Flash-size reality:** `PICO_FLASH_SIZE_BYTES` stays 2 MiB even on BKB 4 MiB chips
+  (`EXTERNAL_FLASH_SIZE 4MiB` in board config.h does NOT feed pico-sdk; linker `flash1` defaults to 2048k
+  since `FLASH_LEN` is undefined). Wear-leveling EEPROM base = `PICO_FLASH_SIZE_BYTES - 8192` = `0x1FE000`;
+  the module's staging slot at `0x100000` (1 MiB) + 256 KiB stays clear of it.
+- **GP17** is the BKB status LED (`RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED`), not used by matrix/RGB, free
+  after boot; QMK chibios `GP17` is literally the numeral `17`, so `sio_hw->gpio_set/clr = 1u<<17` works
+  to pulse it from the RAM-resident commit (configure SIO output beforehand via pico `gpio_set_function`/
+  `gpio_set_dir`).
+- **Phase 1 build facts:** `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` builds the module
+  (`bk_split_flash_flash.c` is added with `SRC +=` in the module `rules.mk`). Phase 1 image: len 93136,
+  crc32 `0x9d33fa25` (~91 KiB binary, UF2 186368 B — comfortably under `SPLIT_FLASH_MAX_IMAGE_SIZE`).
+  `bk_flash_page_buf` + `.time_critical` commit cost ~0.6 KiB RAM; `.bss` was already ~256 KiB (RGB/VIA
+  vendor keymap) — RAM is tight, watch it in later phases.
+- **RP2040 boot2 checksum (verified 2026-11-13 empirically against all six prebuilt blobs in
+  `stage2_bootloaders.c`):** it is NOT a word-sum. `checksum = bitrev32(crc_reg(bitrev8(each of boot2[0:252])))`
+  where `crc_reg` is the raw CRC-32 register (init 0xFFFFFFFF, NO final complement), and `crc_reg` is what
+  `bk_split_flash_crc32` returns *before* the final `~`. Stored checksum word = little-endian at boot2[252:256].
+  `bk_split_flash_boot2_checksum_valid()` in the module header implements it; the native host harness covers
+  it with the real blob (0xd58f0b07).
+- **Vector table offset:** in a QMK/ChibiOS RP2040 image, boot2 occupies image[0,256) and the ARM vector
+  table starts at 0x100 — the initial SP word is at image+0x100 and the reset vector at image+0x104 (a
+  real Phase-1 image: sp=0x20040400, pc=0x100002c5). The module's `bk_split_flash_image_plausible()`
+  reads those offsets (build independent), plus the boot2 checksum.
+
 ## Misc
 
 - `.build/` has per-target `obj_*` dirs and the generated `src/` intermediates (community modules, .inc files).

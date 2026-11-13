@@ -8,8 +8,10 @@
 - **Build strategy:** standalone QMK Community Module enabled by listing it in `keymap.json`; zero edits to QMK core (§3). Three internal seams — trigger / transport / action — with a HAL boundary so the hardware-bound action and the host-testable protocol can be built in parallel.
 - **Status:** Phase 0 **PASSED and complete** (2026-11-12): probe/echo round-trip verified on hardware
   via `qmk console` (see "Phase 0 gate result" below); retrospective written and TLDR confirmed by the
-  user; plan updated. **Phase 1 is NOT started — the user will kick it off later.** The module is inert
-  unless listed in `keymap.json`; QMK core is still untouched.
+  user; plan updated. **Phase 1 implemented and agent-verified (2026-11-13); human validation gate
+  PENDING** — the user will run the Phase 1 gate later; nothing beyond Phase 1 starts until it passes.
+  Resume precisely at the "Phase 1 — Safety core" section below. The module is inert unless listed in
+  `keymap.json`; QMK core is still untouched.
 - **How to work on this plan:** read `docs/superpowers/phase-execution-instructions.md` at the start of
   each phase (ask-the-user rules, retrospective duties), and check `docs/superpowers/qmk-knowledge-base.md`
   **before** researching any QMK behaviour — add new findings there instead of re-researching.
@@ -169,17 +171,17 @@ The plan's original "guarded core edits" are replaced by first-class module hook
 
 **The ROM-fallback trick.** The RP2040 bootrom validates boot2's 4-byte checksum (`boot2_w25q080.S:26`) on power-on and stays in BOOTSEL USB mass storage if it is invalid. Therefore:
 
-1. **Arm:** erase the 4 KiB sector at flash offset 0, invalidating boot2. From this moment until the final write, any reset/power-cycle automatically lands the secondary in the un-erasable BOOTSEL state — no working firmware, no double-tap, no QMK required.
-2. **Stage:** write chunks into the staging slot. Old firmware in the active region is untouched and bootable until step 4.
-3. **Verify:** CRC over the whole staged image plus length/magic checks.
-4. **Commit:** one RAM-resident, interrupts-off section — erase active sectors `[0, image_end)`, copy staging → active page by page, and **write boot2 last**. Its checksum doubles as the "valid" marker, so no separate marker is needed and no module state needs to live in EEPROM (which we wipe).
-5. **Wipe + reboot.**
+1. **Stage:** write chunks into the staging slot. Old firmware in the active region is untouched and bootable until step 4.
+2. **Verify:** CRC over the whole staged image plus length/magic checks.
+3. **Arm + Commit:** one RAM-resident, interrupts-off section — **first erase sector 0 (invalidating boot2 — this is the arm)**, then the remaining active sectors `[0, image_end)`, copy staging → active page by page, and **write boot2 last**. From the sector-0 erase until boot2's final write, any reset/power-cycle automatically lands the secondary in the un-erasable BOOTSEL state — no working firmware, no double-tap, no QMK required. Boot2's checksum doubles as the "valid" marker, so no separate marker is needed and no module state needs to live in EEPROM (which we wipe).
+4. **Wipe + reboot.**
+
+> **Arm-timing decision (2026-11-13, confirmed by the user):** arming happens at the *start of the commit*, not before staging. The plan originally erased sector 0 at BEGIN, but that 4 KiB sector holds the live IRQ vector table (`crt0_v6m.S` sets VTOR to the flash vectors); with interrupts on during the long staging phase, the very next timer interrupt would fetch a `0xFF` vector and hard-fault the running secondary. Erasing it only inside the interrupts-off commit keeps the secondary fully alive through staging, and since commit is the only window where an interrupted write can corrupt the active image, the BOOTSEL guarantee is unchanged. The *only* change versus the earlier plan wording: a mid-staging power cut now boots the old (intact) firmware — safe, no recovery cable, self-heals via the fingerprint check on the next boot — instead of landing in BOOTSEL.
 
 | Interruption point | State on next power-on | Recovery |
 |---|---|---|
-| Before arm | old firmware intact | none; retry next boot |
-| After arm, during staging | boot2 invalid → ROM auto-BOOTSEL | plug secondary USB, drop UF2 |
-| During commit | boot2 still invalid (written last) → ROM auto-BOOTSEL | plug secondary USB, drop UF2 |
+| Before arm (staging/verify) | old firmware intact | none; retry next boot (fingerprints differ → auto re-clone once transport exists) |
+| During commit, before boot2 written | boot2 invalid → ROM auto-BOOTSEL | plug secondary USB, drop UF2 |
 | After boot2 written, before reboot | complete image boots normally | next boot fingerprints match → skip; the settings wipe may be skipped in this tiny window (harmless, see §9) |
 | After reboot | both halves on new firmware | none |
 
@@ -250,14 +252,14 @@ stateDiagram-v2
 ## 8. Slave state machine
 
 1. `split_flash_slave_callback` receives `CAP_QUERY` → compute CRC over its own `[XIP_BASE, &__flash_binary_end)`, fill the response buffer (version, length, CRC). No flash writes.
-2. `BEGIN` → mark busy, pause watchdog, **erase sector 0 (arm ROM fallback)**, erase the staging slot. Deferred to housekeeping; ACK immediately after the erase completes.
+2. `BEGIN` → mark busy, pause watchdog, **erase the staging slot** only. Deferred to housekeeping; ACK immediately after the erase completes. **No sector-0 touch here** — arming is done at commit start (see §4 arm-timing decision).
 3. `CHUNK n` → verify packet CRC and sequence, write `len` bytes into the staging slot at `offset = n * CHUNK_SIZE` via the RAM-resident writer, ACK with `seq`. Out-of-order or duplicate → NACK with expected `seq`.
 4. `VERIFY` → compute CRC over the staged image, compare against the master's advertised CRC and length; also check `len <= SPLIT_FLASH_MAX_IMAGE_SIZE` and a magic header. Report match/mismatch.
-5. On match, deferred **commit**: RAM-resident, interrupts off, erase active region, copy staging → active, write boot2 last.
+5. On match, deferred **commit**: RAM-resident, interrupts off, **erase sector 0 first (arm)**, then erase the remaining active region, copy staging → active, write boot2 last.
 6. `WIPE` → `eeconfig_init()` (`quantum/eeconfig.h:58`) on the secondary.
 7. `mcu_reset()` (`rp2040.c:16`, weak `NVIC_SystemReset`).
 
-Every flash operation is idempotent-ish: a repeated `CHUNK` with the same `seq` rewrites the same bytes; a repeated `VERIFY` recomputes; a repeated `BEGIN` re-erases staging (safe, because boot2 was already armed and the old active image is still intact until commit).
+Every flash operation is idempotent-ish: a repeated `CHUNK` with the same `seq` rewrites the same bytes; a repeated `VERIFY` recomputes; a repeated `BEGIN` re-erases staging (safe, because the old active image stays intact and bootable until commit).
 
 ## 9. Wiping both halves (human decision)
 
@@ -473,9 +475,27 @@ Only after that update does Phase 1 start (Phase 1 kickoff is held for the user)
 
 ### Phase 1 — Safety core
 
-Implement `bk_split_flash_flash.c` behind the `bk_split_flash.h` HAL, plus a native host harness for CRC/verify/length/magic that the agent runs itself (no board needed). The UF2 carries a **temporary on-device test hook** (debug keycode / forced opcode) that runs arm → stage → verify → commit on a canned image, so one UF2 and one flash exercise the writer before any transport exists.
+Implement `bk_split_flash_flash.c` behind the `bk_split_flash.h` HAL, plus a native host harness for CRC/verify/length/magic that the agent runs itself (no board needed). The UF2 carries a **temporary on-device test hook** (a key held at boot on the secondary, configurable row/col; drives the writer via the HAL) that runs erase-staging → stage the canned image (its own `[XIP_BASE, &__flash_binary_end)`) → verify → **arm + commit** (sector-0 erase is the first step of the interrupts-off RAM-resident commit, then copy, boot2 last) → reboot, so one UF2 and one flash exercise the writer before any transport exists. Phase 1 does **not** wipe EEPROM settings (that lands in Phase 3 with the wipe opcode).
 
-**Validation gate:** flash the single Phase 1 UF2; trigger the test hook; perform the §4 power-cut matrix (cut power before arm, mid-stage, mid-commit, after boot2, after reboot) and for each point verify that plugging the secondary's USB into the PC yields a BOOTSEL drive that accepts a UF2; also verify the double-tap path and that the board boots normally afterward. Report PASS/FAIL per power-cut point with the observed BOOTSEL behaviour. The agent proceeds only on PASS.
+**Status 2026-11-13:** code complete (module HAL, flash writer, temp test hook, host harness), host harness PASSES, Phase 1 UF2 built (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`, `bastardkb_dilemma_4x6_4_procyon_vendor.uf2`, image len=93136, crc=0x9d33fa25). **Human validation gate PENDING — resume point.** When resuming: the UF2 is at `/home/qlebastard/bastardkb-qmk/bastardkb_dilemma_4x6_4_procyon_vendor.uf2` (also copied to the userspace folder); the full checklist is below; the user runs it and reports per-item PASS/FAIL; only then start Phase 2. Do not re-verify the host harness unless the module changed.
+
+**Validation gate checklist** (one run per box; the hook is repeatable by power-cycling):
+
+1. **Setup/cable state:** primary (USB half) only on the cable; secondary via TRRS/split cable only. Secondary must already hold this Phase 1 UF2 (seed once: double-tap the secondary + drag its `RPI-RP2` UF2 drop, then it can be refilled from BOOTSEL after any power-cut below).
+2. **Flash the primary:** `qmk flash -kb bastardkb/dilemma/4x6_4_procyon -km vendor` (or drag the UF2 onto the primary).
+3. **Trigger (power-on = plug the primary's USB; the secondary is powered via the split/serial cable from the primary):** unplug the primary's USB (whole board off) → hold the test key (matrix row 0 col 0, i.e. the top-left key of the secondary half) → plug the primary's USB back in, keeping the key held ~1 s while the secondary cold-boots. The split cable can already be connected; only the secondary's boot matters. Normal boots without the key do nothing. To re-run (e.g. after a completed run an interrupted state has been recovered), repeat the unplug → hold → plug cycle — the hook fires only once per boot.
+4. **LED phase map:** solid-ON = armed/pre-arm wait (lasts `BK_SPLIT_FLASH_TEST_START_DELAY_MS` = 3 s) → fast-blink = staging (~2–6 s) → solid-ON = verified, pre-commit pause (3 s) → OFF = commit in progress (~2–4 s) → solid-ON = boot2 written, pre-reboot pause (2 s) → reboot.
+5. **Power-cut matrix** (cut the primary USB = whole board off; wait ~5 s; re-plug; then verify recovery). Track each point below (fill [x] on PASS):
+   - [ ] **During the solid-ON pre-arm wait:** board boots normally (old image untouched). PASS if normal boot, no LED activity without the key.
+   - [ ] **Mid-stage (blink):** board boots normally (old image intact). PASS if normal boot.
+   - [ ] **Mid-commit (LED OFF):** boot2 was erased first → secondary boots into BOOTSEL. PASS if plugging the **secondary's** USB into the PC shows `RPI-RP2` mass-storage that accepts a UF2 drag. Re-seed it with the Phase 1 UF2 before the next run.
+   - [ ] **After boot2 (LED solid-ON before reboot):** complete image is in place → normal boot. PASS if board boots normally afterward.
+   - [ ] **Full run (no cut):** board reboots itself and boots normally afterward.
+6. **Double-tap path:** with the secondary on its own USB, double-tap works and yields a UF2 drive (BOOTSEL via RP2040 double-tap reset). Track: [ ]
+7. **Console (optional):** if `qmk console` shows the slave's output (relay dependent), expect e.g. `len=93136 crc=0x9d33fa25`, `staged+verified`, `commit ok, rebooting`. Not a PASS gate.
+
+**Gate result (fill on completion):** all power-cut points ___ (PASS/FAIL); double-tap ___; overall ___ (PASS/FAIL). Observed anomalies / notes: ___.
+**Report back:** per power-cut point, the observed LED phase, the recovery observed (normal boot vs `RPI-RP2` drive), and PASS/FAIL. The agent proceeds only on PASS. The test hook is **temporary**: Phase 2 replaces the key-trigger with the capability/fingerprint handshake and removes the hook (the `BK_SPLIT_FLASH_TEST_*` knobs and enabled-by-default `BK_SPLIT_FLASH_TEST_ENABLE` become disabled/removed).
 
 ### Phase 2 — Handshake & skip logic
 

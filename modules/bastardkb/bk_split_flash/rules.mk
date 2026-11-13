@@ -1,2 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-# bk_split_flash_flash.c is added in Phase 1; only the module-name .c is auto-included for now.
+# The module-name .c (bk_split_flash.c) is auto-included by the community
+# module build; the flash writer must be added explicitly.
+SRC += bk_split_flash_flash.c
