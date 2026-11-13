@@ -2,6 +2,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+// ===========================================================================
+// DIAG (TEMPORARY - 2026-11-13). Diagnostic-only instrumentation to identify
+// WHICH Phase 2 handshake failure is happening. It changes NO decision logic:
+// it widens the observation window (no early 3-strike settle) and surfaces
+// slave-side state through the RPC echo. ALL of this block and every "#ifdef
+// BK_SPLIT_FLASH_DIAG" / "DIAG" line in bk_split_flash.{c,h} is temporary and
+// is reverted after the failure is identified (see the plan's Phase 2 section
+// and the knowledge base). Do not ship this.
+// ===========================================================================
+#define BK_SPLIT_FLASH_DIAG 1
+
 // The module's split transaction ID (injected into `enum serial_transaction_id`
 // via the generated split_transaction_id_community_modules.inc).
 #define SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH PUT_BK_SPLIT_FLASH
@@ -36,13 +47,31 @@
 // rate-limited housekeeping work.
 // ---------------------------------------------------------------------------
 #ifndef SPLIT_FLASH_HANDSHAKE_TIMEOUT
-#    define SPLIT_FLASH_HANDSHAKE_TIMEOUT 4000 // ms; whole-probe bound, must cover the halves' boot skew
+#    if defined(BK_SPLIT_FLASH_DIAG)
+#        define SPLIT_FLASH_HANDSHAKE_TIMEOUT 8000 // DIAG: wider observation window (was 4000)
+#    else
+#        define SPLIT_FLASH_HANDSHAKE_TIMEOUT 4000 // ms; whole-probe bound, must cover the halves' boot skew
+#    endif
 #endif
 // Internal handshake cadence: the master re-probes every PROBE_INTERVAL_MS while
 // inside the timeout window, so a still-booting secondary is not skipped by one
 // raced probe. Not a Phase-4-finalized knob.
 #ifndef BK_SPLIT_FLASH_PROBE_INTERVAL_MS
 #    define BK_SPLIT_FLASH_PROBE_INTERVAL_MS 200
+#endif
+
+// Consecutive transport-level probe failures before settling on a skip. A peer
+// that answers the board's normal syncs but consistently rejects our RPC is
+// running different firmware; retrying it only burns main-loop time. Moved here
+// (was a local #define in bk_split_flash.c) so DIAG can widen it. DIAG keeps
+// probing for the whole window (no early 3-strike settle) so a later successful
+// probe after the ~3 s boot skew / a transient burst is still observed.
+#ifndef BK_SPLIT_FLASH_PROBE_MAX_TRIES
+#    if defined(BK_SPLIT_FLASH_DIAG)
+#        define BK_SPLIT_FLASH_PROBE_MAX_TRIES 200 // DIAG: no early settle
+#    else
+#        define BK_SPLIT_FLASH_PROBE_MAX_TRIES 3
+#    endif
 #endif
 
 // LED phases use the board's bootloader status LED (GP17 on BKB RP2040 boards);

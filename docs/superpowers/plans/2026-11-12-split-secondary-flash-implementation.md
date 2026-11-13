@@ -139,6 +139,7 @@ The plan's original "guarded core edits" are replaced by first-class module hook
 | `SPLIT_FLASH_CHUNK_SIZE` | `240` | payload bytes per transaction (leaves room for opcode/seq/CRC in 255) |
 | `SPLIT_FLASH_HANDSHAKE_TIMEOUT` | `4000` ms (was `100` ms until the 2026-11-13 gate found a ~3 s boot skew) | bounds the whole probe window; must exceed the halves' boot skew so a late-booting secondary can still answer |
 | `BK_SPLIT_FLASH_PROBE_INTERVAL_MS` | `200` ms (internal; not Phase-4-finalized) | cadence between probe retries inside the handshake window |
+| `BK_SPLIT_FLASH_PROBE_MAX_TRIES` | `3` (DIAG: `200`) | consecutive transport-level probe failures before settling on a skip; moved into `config.h` 2026-11-13 (was a local `#define` in `bk_split_flash.c`); DIAG widens it so the window is not settled early |
 | `SPLIT_FLASH_TRANSFER_TIMEOUT` | `60` s | whole-transfer bound (the anti-"appears hung" guard) |
 | `SPLIT_FLASH_FORCE` | off | optional "force re-clone" escape hatch |
 
@@ -573,17 +574,33 @@ Paste into a fresh session:
 
 Add the capability/fingerprint probe, the runtime CRC over `[XIP_BASE, &__flash_binary_end)`, skip policy (no reply / version mismatch / identical CRC+length → skip), and the one-shot per-boot guard. No transfer yet.
 
-**Status 2026-11-13 (rev 2):** root cause of the primary boot stall found and fixed. The original
-handshake probed on a cadence regardless of the split link state; each failed serial read blocks the
-shared main loop up to `SERIAL_USART_TIMEOUT` (20 ms), and RPC failures do NOT bump QMK's
-`connection_errors` counter (only the base sync does), so a mid-boot / mismatched peer was probed ~20
-times over the 4 s window → the primary appeared dead for ~2-3 s (typing dead, LEDs off). A/B diagnostic
-(handshake compiled out, built and flashed 2026-11-13) confirmed it: boots fast without the handshake.
-**Fix:** the master only probes while `is_transport_connected()` is true (the board's own split sync says
-the peer is up) and settles after ≤3 transport failures instead of hammering the window; a late-booting
-secondary is still caught because the connected flag flips when it answers a normal sync. The 4 s
-window still bounds the decision. Host harness PASSES, build clean, no QMK core edits. **Awaiting
-re-validation of the gate (below), including that the primary now boots as fast as stock.**
+**Status 2026-11-13 (rev 3 — handshake RPC fixed):** the stage-logging diagnostic (probe round trip
+printed per stage) showed stages 1-3 succeed in ~2 ms but stage 4 (echo read) always times out at
+`SERIAL_USART_TIMEOUT`, then every later transaction times out. Root cause: the slave computed its
+one-time whole-image CRC-32 **inside the RPC handler** (on the slave's main-loop path), so the echo was
+late; the stray echo then desynchronized the half-duplex wire for the rest of the handshake window.
+**Fix:** both halves compute their own fingerprint at `keyboard_post_init` (start of boot, ~tens of ms,
+imperceptible against the ~3 s skew) and the RPC handler only copies cached values, so the echo is
+served in microseconds. Combined with the rev 2 fix (probe only when `is_transport_connected()`, settle
+after ≤3 transport failures), the handshake now: never blocks the primary's main loop, works on a cold
+boot with both halves on the same image (case b expected to show the identical-fingerprint line), and is
+bounded by the 4 s window. Host harness PASSES, build clean, no QMK core edits. **Awaiting re-validation
+of the gate (below).**
+
+**Status 2026-11-13 (rev 4 — DIAG instrumentation, TEMPORARY):** the rev 3 gate still reported the
+primary printing `DECISION skip (no current-protocol reply from the secondary)` (`bk_split_flash.c:117`),
+i.e. three consecutive transport-level RPC failures — a wire/transport failure of the 4-phase RPC, **not**
+a fingerprint/version decision. A **diagnostic-only** build was added to identify which candidate failure
+it is (H1 early 3-strike settle during the ~3 s boot skew; H2 slow inline-CRC first probe → late echo →
+half-duplex desync; H3 peer not running this image; H5 master/slave role mis-detection; H6 build/config
+skew; or peer-absent timeout). It changes **no decision logic**: under `BK_SPLIT_FLASH_DIAG` (`config.h`)
+the probe cap `BK_SPLIT_FLASH_PROBE_MAX_TRIES` is 200 (no early settle) and `SPLIT_FLASH_HANDSHAKE_TIMEOUT`
+is 8000 ms; the slave handler reports `ready_before`/`dt_ms`/`calls` back through the RPC echo (three extra
+`diag_*` bytes in `bk_split_flash_echo_t`, sized to exactly `RPC_S2M_BUFFER_SIZE=16`); the master logs
+`DIAG conn=`, `DIAG probing`, `DIAG attempt #`, `DIAG attempt # FAIL ... dt=` and appends `t=`/`rejects=`
+to every DECISION line. **Every DIAG line and the whole `BK_SPLIT_FLASH_DIAG` block are temporary and are
+reverted once the failure is identified** — this is not a shipped behaviour change. Diagnostic UF2:
+`bk_split_flash_phase2_diag.uf2` (module-only edits, no QMK core edits).
 
 **Validation gate (revised 2026-11-13):** flash the single Phase 2 UF2 to the primary only. No key needs
 pressing — the handshake is fully automatic (no trigger). Report the console output for:

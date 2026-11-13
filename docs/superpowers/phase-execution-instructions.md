@@ -17,6 +17,17 @@ phase ends (retrospective + plan update).
    - If not, research it manually, **add your findings to the knowledge base doc**, then proceed.
    - Do not re-research something already documented; trust and verify quickly instead.
 
+## Tooling discipline (always apply)
+
+- **Never run git** (`status`, `log`, `diff`, `commit`, `checkout`, ...) on this project. Version control
+  is not part of this workflow; it is not evidence and must not be used for orientation or verification.
+- **Build/compile once per phase artefact.** A successful build is proof of a clean compile; do not
+  recompile to re-derive or re-check it, warnings included. If the build succeeded, it succeeded.
+- **Run each check once.** Do not re-run a command (e.g. a host harness) or re-verify evidence that a
+  build, a `STATIC_ASSERT`, or an earlier run already proved.
+- **Before running any command, ask: is it required for this phase's single deliverable?** If not, skip it.
+  This covers exploratory reads, extra builds, and re-checks; prefer reading files over running tools.
+
 ## Ask the user — don't assume
 
 - **Don't hesitate to ask the user questions. Don't make assumptions about their intentions.**

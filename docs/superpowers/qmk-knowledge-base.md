@@ -132,6 +132,31 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
 - `print`/`xprintf` are safe to call from the RPC slave callback (it runs in the serial thread context,
   not an ISR).
 
+## Split-flash handshake DIAG build (2026-11-13, TEMPORARY — revert after diagnosis)
+
+- The rev 3 Phase 2 gate still showed `bk_split_flash: DECISION skip (no current-protocol reply from the
+  secondary)` — three consecutive transport-level RPC failures (a wire failure of the 4-phase RPC), not a
+  fingerprint/version decision. A **diagnostic-only** build discriminates the candidates.
+- **Temporary instrumentation (module-only, no QMK core edits).** `#define BK_SPLIT_FLASH_DIAG 1` in the
+  module `config.h` switches it on. It changes no decision logic; it only widens the observation window
+  (`BK_SPLIT_FLASH_PROBE_MAX_TRIES` 3→200, `SPLIT_FLASH_HANDSHAKE_TIMEOUT` 4000→8000) and surfaces
+  slave-side state over the echo. **All of it is reverted after the failure is identified.**
+- **Config `-include` mechanism (why the header can see `BK_SPLIT_FLASH_DIAG`):** every module/keyboard
+  `config.h` is passed to the compiler as `-include <file>` (`builddefs/common_rules.mk:281-284`,
+  `build_keyboard.mk:537`), so the macro is defined before any `#include` in every translation unit,
+  including `bk_split_flash.h`. The native host harness (`host/`) does not include `config.h`, so the
+  `diag_*` echo fields are absent there — harmless (it only checks `sizeof(echo_t) <= 16`).
+- **`bk_split_flash_echo_t` size:** without DIAG 12 B, with DIAG 16 B (4×u8 + 2×u32 + 3×u8, padded to 16)
+  = exactly `RPC_S2M_BUFFER_SIZE`; the `_Static_assert` in `bk_split_flash.c` still holds.
+- **How to read the DIAG log (which hypothesis):** FAIL with `dt≈20 ms` clustered right after the first
+  `DIAG conn=1`, then a later attempt SUCCEEDS → H1 (early settle only). First `diag_ready=0` /
+  `ready_before=0` with a large `dt_ms` and failures across the whole window → H2. FAIL with `dt<5 ms` /
+  wrong shake / `probe answered but reply is not current protocol` → H3. No `DIAG attempt` line at all →
+  H5. Fast FAILs with a handshake-constant mismatch → H6. `DIAG conn=0` the whole window → peer absent /
+  timeout (different symptom).
+- Diagnostic artifact: `bk_split_flash_phase2_diag.uf2` from
+  `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`.
+
 ## Keyboards / build target
 
 - Target board: `bastardkb/dilemma/4x6_4_procyon` (folder under `keyboards/bastardkb/dilemma/`,
@@ -156,6 +181,14 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   boot for seconds (root-caused 2026-11-13 via a handshake-disabled A/B build). Rule: only run split-RPC
   from housekeeping code when `is_transport_connected()` is already true, and settle (skip/fail) after a
   small number of consecutive RPC failures instead of hammering the whole window.
+- **The slave RPC handler must be effectively instantaneous.** EXECUTE_RPC returns to the master as soon
+  as the request is written; the master immediately opens GET_RPC_RESP_DATA and waits ≤ `SERIAL_USART_TIMEOUT`
+  for the echo. Any work the handler does on the slave's main-loop path (i.e. the one-time CRC-32 of the
+  92 KiB image, ~tens of ms) delays the echo past the master's 20 ms read → `transaction_rpc_exec` fails
+  AND the stray echo desynchronizes the half-duplex wire (every later transaction times out) until the
+  connection re-syncs. Root-caused 2026-11-13 with a stage-logging probe (stage1-3 OK in 2 ms, stage4/read
+  timed out at 20 ms, then all stages timed out). Fix: compute fingerprints at `keyboard_post_init`
+  (both halves), never inside the RPC callback.
 
 ## RP2040 flash self-write (learned 2026-11-13, Phase 1 safety core)
 

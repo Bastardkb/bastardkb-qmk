@@ -37,6 +37,15 @@ typedef struct {
     uint8_t  status;    // BK_SPLIT_FLASH_STATUS_* - capability/ack
     uint32_t image_len; // peer's image length
     uint32_t image_crc; // peer's CRC-32 over its own image
+#ifdef BK_SPLIT_FLASH_DIAG
+    // DIAG (TEMPORARY - 2026-11-13): slave-side state surfaced to the master over
+    // the echo so it appears even when slave console relay is off. All three are
+    // reverted with the rest of the DIAG instrumentation. sizeof(echo_t) with
+    // these is exactly RPC_S2M_BUFFER_SIZE (16); without DIAG it is 12.
+    uint8_t diag_self_ready;    // bk_split_flash_self_ready BEFORE the handler's ensure call
+    uint8_t diag_handler_ms;    // ms spent in the handler's fingerprint work (clamped to 255)
+    uint8_t diag_handler_calls; // cumulative slave handler invocations (clamped to 255)
+#endif
 } bk_split_flash_echo_t;
 
 // Master-side handshake decision (plan section 5 skip policy).
