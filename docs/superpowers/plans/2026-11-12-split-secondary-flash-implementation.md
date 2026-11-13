@@ -8,9 +8,11 @@
 - **Build strategy:** standalone QMK Community Module enabled by listing it in `keymap.json`; zero edits to QMK core (§3). Three internal seams — trigger / transport / action — with a HAL boundary so the hardware-bound action and the host-testable protocol can be built in parallel.
 - **Status:** Phase 0 **PASSED and complete** (2026-11-12): probe/echo round-trip verified on hardware
   via `qmk console` (see "Phase 0 gate result" below); retrospective written and TLDR confirmed by the
-  user; plan updated. **Phase 1 implemented and agent-verified (2026-11-13); human validation gate
-  PENDING** — the user will run the Phase 1 gate later; nothing beyond Phase 1 starts until it passes.
-  Resume precisely at the "Phase 1 — Safety core" section below. The module is inert unless listed in
+  user; plan updated. **Phase 1 PASSED (2026-11-13):** code, host harness and the human
+  validation gate are complete; one caveat — the `status=4` commit-blackout power cut was too short to
+  exercise reliably, accepted by the user because `RPI-RP2` re-flash recovery works. End-of-phase
+  retrospective, workflow refinements and the **Phase 2 handoff prompt** are written below; plan
+  updated. **Phase 2 is NOT started — awaiting explicit kickoff.** The module is inert unless listed in
   `keymap.json`; QMK core is still untouched.
 - **How to work on this plan:** read `docs/superpowers/phase-execution-instructions.md` at the start of
   each phase (ask-the-user rules, retrospective duties), and check `docs/superpowers/qmk-knowledge-base.md`
@@ -245,7 +247,7 @@ stateDiagram-v2
 ```
 
 - One-shot guard: a static flag in the module, set once per boot after a completed or skipped decision. Because EEPROM is wiped, **no persistent state is stored in EEPROM**; the fingerprint comparison itself is the persistent state.
-- Progress indication: bounded and visible via existing debug/LED hooks (`dprintf`, `RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17` is available on BKB boards). No custom USB interface.
+- Progress indication: bounded and visible. **Primary (product-facing) indicator: an RGB progress effect** — the primary drives the split RGB matrix (`rgb_matrix` with `split_count [52,52]`), so during a transfer it shows a bounded solid-colour / progress-bar effect that is relayed to the secondary via the existing split RGB sync, and restores the user's effect afterwards. Added to the plan 2026-11-13 after the user confirmed the GP17 status LED produced nothing visible on the dilemma and that end users flashing via UF2 drag have no console. Secondary indicators: `dprintf` / `qmk console` `status=` lines and `RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17` (BKB boards — treat as best-effort, not relied upon). No custom USB interface. The RGB work belongs to Phase 3 (the Phase 1 test hook is removed in Phase 2); keep it bounded by `SPLIT_FLASH_TRANSFER_TIMEOUT` and never block the primary's boot.
 - The primary tolerates the secondary disappearing at the final reboot; no blocking wait.
 - `bootloader_jump()` / `reset_usb_boot()` is **not called in the happy path** — consistent with "no boot mode on the secondary". It remains the recovery mechanism reachable via QK_BOOT, bootmagic, and double-tap, which satisfies "use QMK mechanisms like that bootload function" without invoking it during a clone.
 
@@ -287,7 +289,7 @@ Every flash operation is idempotent-ish: a repeated `CHUNK` with the same `seq` 
 3. Optional, later: `SELECT_SOFT_SERIAL_SPEED 0` / `SERIAL_USART_SPEED 460800` (`serial_usart.h:27-38`); `SERIAL_USART_FULL_DUPLEX` boards (`splinktegrated_rev3/config.h`) naturally do better.
 4. Never buffer the whole image in RAM; stream straight from XIP flash into staging flash.
 
-The transfer pauses normal matrix/key-report traffic; keep it bounded by `SPLIT_FLASH_TRANSFER_TIMEOUT` and show progress so it does not look like a hang.
+The transfer pauses normal matrix/key-report traffic; keep it bounded by `SPLIT_FLASH_TRANSFER_TIMEOUT` and show progress so it does not look like a hang — console `status=` plus the Phase 3 RGB progress effect (§7), since a plain UF2-drag user has no console.
 
 ## 11. Seed flash and capability gating (human decision)
 
@@ -320,7 +322,7 @@ Hardware verification is not executed by the agent: it is performed by the human
 - Second boot does **not** re-clone (fingerprints match).
 - Manual UF2 drag and QMK Toolbox both work, not just `qmk flash`.
 - If both halves' USB are ever connected, `uf2conv.py:359-370` flashes both drives and the clone skips (no duplicate work).
-- `qmk console` / `dprintf` shows bounded progress and a clean abort on a deliberately disconnected secondary.
+- `qmk console` / `dprintf` shows bounded progress and a clean abort on a deliberately disconnected secondary; the **RGB progress effect (§7) appears during the transfer and the normal effect is restored afterwards** (Phase 3).
 
 **Power-cut injection — the most important test.** Cut power at each point in §4's table (before arm, mid-stream, mid-commit, after boot2, after reboot) and verify that plugging the secondary's USB into the PC and power-cycling yields a BOOTSEL drive that accepts a UF2. Also verify the double-tap path. This is what substantiates "unbrickable".
 
@@ -377,6 +379,24 @@ This applies to every phase in §13 and is the mechanism for working efficiently
 - **No per-phase flag-off control builds** (all code lives in `modules/bastardkb/bk_split_flash`; module
   absent = that folder not compiled = stock by construction). One-off run in Phase 0 confirmed it; retired.
 
+**Workflow refinements from the Phase 1 retrospective (2026-11-13):**
+
+- **Never choose a held-key trigger without checking QMK core boot-time key consumers first.** Read the
+  generated `info_config.h` and `quantum/bootmagic/bootmagic.c`, and hold the key on the **stock image** to
+  confirm it does nothing. On this board Bootmagic uses `(0,0)` on the left half and `(5,0)` on the right
+  (`split.bootmagic.matrix` is a *right-half override*, not a replacement for the left default); the safe
+  Phase 1 test key is `(1,0)`.
+- **Verify observability in the actual channel before the gate.** Slave `xprintf` is not relayed on this
+  build and the GP17 status LED produced nothing visible. Put progress in the probe echo (`status=`) and
+  confirm the line appears in the primary's `qmk console` unconditionally, with no device-debug toggle.
+- **"No signal from the hook" means the hook isn't running.** If a gate expects a status/LED and it is
+  absent, widen the search to board/QMK startup behaviour instead of iterating on the module; honour the
+  two-attempt rule.
+- **Keep gate checklists self-diagnosing:** include a no-key-held baseline and a stock-image comparison so
+  environment vs module failures are distinguishable.
+- **Record hardware/QMK facts in the knowledge base immediately** (Bootmagic, boot2 CRC32, vector-table
+  offsets, split transport serviced from the main loop, GP17 invisibility).
+
 ## 13. Phase breakdown (one UF2 + validation gate each)
 
 Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4_procyon` and stops at the validation gate described below; the agent proceeds only on a PASS report from the human partner. UF2 names below are handover labels for that single `qmk compile` output.
@@ -384,9 +404,9 @@ Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4_procyon` and sto
 | Phase | Deliverable | UF2 artifact | Exit criterion |
 |---|---|---|---|
 | 0 — Walking skeleton / verify foundation | Standalone Community Module scaffold (`qmk_module.json`, `config.h`, `rules.mk`), one RPC ID, capability probe + echo in both directions, no flash writes; retire the caveats; rehearsal of the workflow | `bk_split_flash_phase0.uf2` | Compiles with the module enabled; `NUM_TOTAL_TRANSACTIONS <= 32` holds; probe/echo round-trips on both halves; checklist proven usable; plan updated after retrospective — **DONE 2026-11-12** |
-| 1 — Safety core | `bk_split_flash_flash.c`: staging erase/program, RAM-resident writer, boot2 arm/last-write, commit, CRC verify; HAL + native test harness; temporary on-device test hook | `bk_split_flash_phase1.uf2` | Power-cut matrix passes on one board; recovery yields a BOOTSEL drive every time |
+| 1 — Safety core | `bk_split_flash_flash.c`: staging erase/program, RAM-resident writer, boot2 arm/last-write, commit, CRC verify; HAL + native test harness; temporary on-device test hook | `bk_split_flash_phase1.uf2` | Power-cut matrix passes on one board; recovery yields a BOOTSEL drive every time — **DONE 2026-11-13 (PASS with the `status=4` window caveat; retrospective + Phase 2 handoff prompt written)** |
 | 2 — Handshake | Capability/fingerprint probe, runtime CRC over own image, skip policy, one-shot guard | `bk_split_flash_phase2.uf2` | Old secondary skipped cleanly; identical fingerprints skip; no re-clone loop |
-| 3 — Transfer | Chunked numbered packets, CRC, ACK/NACK, retransmission, windowing, timeouts, watchdog pause, progress, both-halves wipe + reboot | `bk_split_flash_phase3.uf2` | Full 190 KiB clone completes within `SPLIT_FLASH_TRANSFER_TIMEOUT` on half-duplex |
+| 3 — Transfer | Chunked numbered packets, CRC, ACK/NACK, retransmission, windowing, timeouts, watchdog pause, console + **RGB progress effect** (§7), both-halves wipe + reboot | `bk_split_flash_phase3.uf2` | Full 190 KiB clone completes within `SPLIT_FLASH_TRANSFER_TIMEOUT` on half-duplex |
 | 4 — Packaging | Finalize knobs/asserts, README, board docs, seed-flash & recovery instructions; flag-off = stock check | `bk_split_flash_phase4.uf2` (first release candidate) | Module off = stock build; module on = documented; `qmk compile` clean; stock flash paths unchanged |
 | 5 — Optional tuning | 460800 baud trial, windowed ACKs, full-duplex tuning | `bk_split_flash_phase5.uf2` | Measured improvement without reliability regressions |
 
@@ -477,7 +497,7 @@ Only after that update does Phase 1 start (Phase 1 kickoff is held for the user)
 
 Implement `bk_split_flash_flash.c` behind the `bk_split_flash.h` HAL, plus a native host harness for CRC/verify/length/magic that the agent runs itself (no board needed). The UF2 carries a **temporary on-device test hook** (a key held at boot on the secondary, configurable row/col; drives the writer via the HAL) that runs erase-staging → stage the canned image (its own `[XIP_BASE, &__flash_binary_end)`) → verify → **arm + commit** (sector-0 erase is the first step of the interrupts-off RAM-resident commit, then copy, boot2 last) → reboot, so one UF2 and one flash exercise the writer before any transport exists. **This is a local self-clone, not a primary→secondary transfer — no transport exists yet and the primary is not involved.** Phase 1 does **not** wipe EEPROM settings (that lands in Phase 3 with the wipe opcode). The final trigger (Phases 2–3) is an automatic fingerprint mismatch on boot after the primary is flashed by any method; no key.
 
-**Status 2026-11-13:** code complete (module HAL, flash writer, temp test hook, host harness), host harness PASSES, Phase 1 UF2 built (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`, `bastardkb_dilemma_4x6_4_procyon_vendor.uf2`, image len=93280, crc=0x48dd14d1). **Human validation gate PENDING — resume point.** When resuming: the UF2 is at `/home/qlebastard/bastardkb-qmk/bastardkb_dilemma_4x6_4_procyon_vendor.uf2` (also copied to the userspace folder); the full checklist is below; the user runs it and reports per-item PASS/FAIL; only then start Phase 2. Do not re-verify the host harness unless the module changed. The temporary hook is a **non-blocking state machine** (one flash page per housekeeping tick), so the slave's split transport stays alive and its progress is visible as `status=` in the primary's `qmk console` — see the status map below. **Trigger key is `(1,0)`, NOT `(0,0)`** — see the Bootmagic note in step 3.
+**Status 2026-11-13:** code complete (module HAL, flash writer, temp test hook, host harness), host harness PASSES, Phase 1 UF2 built (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`, `bastardkb_dilemma_4x6_4_procyon_vendor.uf2`, image len=93280, crc=0x48dd14d1). **Human validation gate PASSED (with one caveat) — see Gate result below.** Phase 2 is NOT started; awaiting explicit kickoff.
 
 **Validation gate checklist** (one run per box; the hook is repeatable by power-cycling):
 
@@ -497,10 +517,33 @@ Implement `bk_split_flash_flash.c` behind the `bk_split_flash.h` HAL, plus a nat
    - [ ] **While console shows `status=5` (boot2 written, before reboot):** complete image is in place → normal boot. PASS if board boots normally afterward.
    - [ ] **Full run (no cut):** console shows `1 → 2 → 3 → 4 → (blackout) → 5 → 0` and the board reboots itself, then both halves work normally.
 6. **Double-tap path:** with the secondary on its own USB, double-tap works and yields a UF2 drive (BOOTSEL via RP2040 double-tap reset). Track: [ ]
-7. **Console (optional):** if `qmk console` shows the slave's output (relay dependent), expect e.g. `len=93184 crc=0xc3fd5182`, `staged+verified`, `commit ok, rebooting`. Not a PASS gate.
+7. **Console (reference):** slave `xprintf` is **not** relayed on this build; the working channel is the `status=` field of the primary's probe echo, printed unconditionally. A Phase 1 image prints `len=93280 crc=0x48dd14d1` at hook start. Not a PASS gate.
 
-**Gate result (fill on completion):** all power-cut points ___ (PASS/FAIL); double-tap ___; overall ___ (PASS/FAIL). Observed anomalies / notes: ___.
-**Report back:** per power-cut point, the observed LED phase, the recovery observed (normal boot vs `RPI-RP2` drive), and PASS/FAIL. The agent proceeds only on PASS. The test hook is **temporary**: Phase 2 replaces the key-trigger with the capability/fingerprint handshake and removes the hook (the `BK_SPLIT_FLASH_TEST_*` knobs and enabled-by-default `BK_SPLIT_FLASH_TEST_ENABLE` become disabled/removed).
+**Phase 1 gate result (user report 2026-11-13): overall PASS.** Console `status=` sequence observed and working; normal-boot recovery observed for the armed/staging cuts; full run self-reboots. Per-point detail was not itemised by the user; the checkboxes above are a reusable template for re-runs. Caveat: the `status=4` commit-blackout power cut was **too short to exercise reliably**; the user accepts this because the `RPI-RP2` re-flash recovery path works. **No RGB indications were observed** and no RGB indication exists in the code — the only on-device indicator implemented is the GP17 status LED blink pattern, which produced nothing visible on this board; the working indicator is the console `status=` (probe echo). RGB progress is not currently in the plan (see §7/Phase 3: only `dprintf` + GP17 LED + "bounded visible progress"). **Resolved 2026-11-13: user approved adding an RGB progress indication** — the plan §7/§10/§12/Phase 3/risk register/phase table are amended accordingly; the RGB effect is the primary product-facing indicator, console + GP17 are secondary. Implemented in Phase 3, not before (Phase 2 removes the temporary test hook).
+
+### Phase 1 retrospective (2026-11-13)
+
+**What went well**
+- The safety core was correct from the first build: host harness (CRC-32 known vectors; boot2 checksum algorithm verified against all six BKB prebuilt boot2 blobs), compile-time flash-layout asserts, ELF check that `bk_split_flash_commit` landed in `.time_critical` RAM (`0x20000000`), and plausibility/CRC validation of the real 93280-byte image — all passed. **No hardware was ever bricked**; recovery via `RPI-RP2` worked every time.
+- The approved arm-at-commit-start change held up: cuts during staging boot old firmware, commit is the only BOOTSEL window.
+- The non-blocking state machine plus `status=` in the RPC echo produced an unconditional, relay-independent observability channel on the primary's console and made the gate conclusive.
+- User pushback ("maybe it's a design issue? expand the field") broke the tunnel vision. The knowledge base now carries the real QMK facts: Bootmagic, boot2 CRC32, vector-table offsets, split transport serviced from the main loop, GP17 invisibility.
+
+**What went badly**
+- The trigger key was chosen as `(0,0)` without checking QMK Bootmagic. `split.bootmagic.matrix [5,0]` is **only the right-half override**; the left half falls back to `bootmagic.h` defaults `(0,0)`, so holding L00 at boot jumped into ROM BOOTSEL **before QMK ran**. The hook never executed — hence no `status=` lines, no LED, and no self-recovery. This cost several failed gate rounds and user time.
+- I misread "left dead + `probe failed`" as a *failing hook* twice (LED fail-encoding, then the non-blocking rewrite) before widening the search. The "two attempts then stop" rule should have kicked in earlier; the user had to invoke it.
+- Gate observability was designed around the GP17 status LED (nothing visible on this board) and slave `xprintf` (no console relay). The instructions say verify the intended channel *before* the gate; that wasn't done.
+- Stale plan numbers (190 KiB / 20–40 s) vs the actual 93 KiB image were caught only because the user asked. No timing re-target was requested (optimization stays in Phase 5).
+
+**TLDR:** Phase 1 PASSED — the safety core works (stage → verify → arm+commit → reboot; power cuts recover via normal boot or `RPI-RP2` reflash; no bricks), host harness passes, one UF2 produced. The gate confusion was **not** a flash-writer bug: it was QMK Bootmagic stealing the `(0,0)` trigger key plus an invisible GP17 LED. Fixes: trigger moved to `(1,0)`, progress reported via console `status=`, RGB progress planned for Phase 3. Process lesson: verify the trigger and the observability channel against QMK core boot-time behaviour before blaming the module, and widen the search after two attempts.
+
+### Phase 2 handoff prompt
+
+Paste into a fresh session:
+
+> Start Phase 2 from `docs/superpowers/plans/2026-11-12-split-secondary-flash-implementation.md` (§Phase 2). Read `docs/superpowers/phase-execution-instructions.md` and `docs/superpowers/qmk-knowledge-base.md` first — don't re-research facts already there. Phase 1 is PASSED (gate result + retrospective in the plan); don't start Phase 3. Scope: capability/fingerprint handshake, runtime CRC over `[XIP_BASE, &__flash_binary_end)`, skip policy (no reply / version mismatch / identical CRC+length → skip), one-shot per-boot guard. No transfer, no flash writes. Remove the temporary Phase 1 test hook (key trigger + `BK_SPLIT_FLASH_TEST_*` state machine) and replace it with the handshake; keep the Phase 0 probe/echo as the transport seam (the echo `status=` field is the working console channel). Target `bastardkb/dilemma/4x6_4_procyon`, `-km vendor`, one UF2, no QMK core edits; module lives in `modules/bastardkb/bk_split_flash`. Stop at the Phase 2 validation gate. Ask before any plan changes.
+
+**Report back:** per power-cut point, the observed `status=` value, the recovery observed (normal boot vs `RPI-RP2` drive), and PASS/FAIL. The agent proceeds only on PASS. The test hook is **temporary**: Phase 2 replaces the key-trigger with the capability/fingerprint handshake and removes the hook (the `BK_SPLIT_FLASH_TEST_*` knobs and enabled-by-default `BK_SPLIT_FLASH_TEST_ENABLE` become disabled/removed).
 
 ### Phase 2 — Handshake & skip logic
 
@@ -510,9 +553,9 @@ Add the capability/fingerprint probe, the runtime CRC over `[XIP_BASE, &__flash_
 
 ### Phase 3 — Chunked transfer
 
-Add chunked numbered packets, packet CRC, ACK/NACK, bounded retransmission, optional ACK windowing, global `SPLIT_FLASH_TRANSFER_TIMEOUT`, the watchdog pause, bounded visible progress, and the end-to-end wipe + reboot of both halves.
+Add chunked numbered packets, packet CRC, ACK/NACK, bounded retransmission, optional ACK windowing, global `SPLIT_FLASH_TRANSFER_TIMEOUT`, the watchdog pause, **bounded visible progress including the RGB progress effect on the primary (§7, approved 2026-11-13)**, and the end-to-end wipe + reboot of both halves.
 
-**Validation gate:** flash the single Phase 3 UF2 to the primary only (secondary already seeded). Report: bounded progress in console; after reboot the secondary's image CRC equals the primary's (give both values); a **second boot does not re-clone**; both halves' runtime settings are reset and handedness (`SPLIT_HAND_PIN`) is still correct; transfer completes within `SPLIT_FLASH_TRANSFER_TIMEOUT`; and a clean bounded abort when the secondary is deliberately disconnected. Provide the console log and PASS/FAIL. The agent proceeds only on PASS.
+**Validation gate:** flash the single Phase 3 UF2 to the primary only (secondary already seeded). Report: bounded progress in console **and the RGB progress effect appears on the primary during the transfer, is relayed to the secondary, and the user's normal RGB effect is restored afterwards**; after reboot the secondary's image CRC equals the primary's (give both values); a **second boot does not re-clone**; both halves' runtime settings are reset and handedness (`SPLIT_HAND_PIN`) is still correct; transfer completes within `SPLIT_FLASH_TRANSFER_TIMEOUT`; and a clean bounded abort when the secondary is deliberately disconnected. Provide the console log and PASS/FAIL. The agent proceeds only on PASS.
 
 ### Phase 4 — Packaging
 
@@ -541,7 +584,7 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 | Version coupling | Intended — no `EE_HANDS`, one image for both halves; compile-time assert prevents enabling on an `EE_HANDS` board |
 | Brick / power loss | Arm boot2 → stage → verify → commit → boot2 last; ROM auto-BOOTSEL on any interruption; double-tap hatch |
 | Watchdog reset mid-write | Feed/refresh via the public `split_watchdog_update(true)` from the module's housekeeping loop (verified public; `split_watchdog_init()` is internal — see knowledge base); no core edit |
-| Silent 20–40 s freeze | Bounded global timeout, visible progress, no blocking of primary boot |
+| Silent 20–40 s freeze | Bounded global timeout, **RGB progress effect on the primary (Phase 3, approved 2026-11-13)**, console `status=` progress, no blocking of primary boot |
 | Slave reboot disappearing | Primary tolerates it; no blocking wait |
 | EEPROM wipe wiping state the module needs | Module keeps no EEPROM state; fingerprint is the persistent state |
 | Settings loss on every update | Human decision; documented in README and board docs |
@@ -552,6 +595,8 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 
 - **The Phase 0 walking skeleton retires (not defers) the architectural caveats:** the 32-ID budget under RPC, RPC buffer sizing, module discovery from the `modules/bastardkb/bk_split_flash` path (loader expects `modules/` plural — `module/` wording was a typo), and the watchdog pause (needs only the public `split_watchdog_update(bool)`, no core edit). These were confirmed in the Phase 0 build attempt / knowledge base on 2026-11-12.
 - **Phase 0 board id/keymap fixed:** `bastardkb/dilemma/4x6_4_procyon` (underscore) is the single test board; phase builds use `-km vendor` (userspace keymap, already lists the module + console on).
+- **Progress indication resolved (2026-11-13):** the GP17 status LED produced nothing visible on the dilemma, and end users have no console — the user approved an **RGB progress effect on the primary in Phase 3** as the primary indicator (§7). Console `status=` + GP17 remain secondary. The Phase 1 temporary test hook stays console/GP17-only and is removed in Phase 2.
+- **Phase 1 gate caveat:** the `status=4` commit-blackout power cut was too short to exercise reliably; accepted because `RPI-RP2` re-flash recovery works. If a later phase needs that point verified, add a test-only pause just after the sector-0 erase (arm) to widen the window.
 - Exact staging offset and whether to reserve a second slot for A/B redundancy (the design uses one slot + arming; a second slot would shrink the danger window further at the cost of complexity — recommended: **one slot**, keep it simple).
 - CRC width and polynomial (reuse the QMK CRC helpers already used at `transactions.c:150`).
 - Whether the wipe should be `eeconfig_init()` only or also a raw erase of the 8192-byte wear-leveling backing region (`wear_leveling_rp2040_flash_config.h:16`).

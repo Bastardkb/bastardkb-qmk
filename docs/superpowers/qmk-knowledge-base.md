@@ -174,8 +174,8 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   to pulse it from the RAM-resident commit (configure SIO output beforehand via pico `gpio_set_function`/
   `gpio_set_dir`).
 - **Phase 1 build facts:** `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` builds the module
-  (`bk_split_flash_flash.c` is added with `SRC +=` in the module `rules.mk`). Phase 1 image: len 93184,
-  crc32 `0xc3fd5182` (~91 KiB binary, UF2 188416 B — comfortably under `SPLIT_FLASH_MAX_IMAGE_SIZE`).
+  (`bk_split_flash_flash.c` is added with `SRC +=` in the module `rules.mk`). Phase 1 image: len 93280,
+  crc32 `0x48dd14d1` (~91 KiB binary, UF2 186880 B — comfortably under `SPLIT_FLASH_MAX_IMAGE_SIZE`).
   `bk_flash_page_buf` + `.time_critical` commit cost ~0.6 KiB RAM; `.bss` was already ~256 KiB (RGB/VIA
   vendor keymap) — RAM is tight, watch it in later phases.
 - **RP2040 boot2 checksum (verified 2026-11-13 empirically against all six prebuilt blobs in
@@ -210,6 +210,11 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   once `status=1` appears. User observation: a left half that is dead for a full minute and only
   recovers via unplug/replug (then enumerates as a normal keyboard standalone, NOT `RPI-RP2`) rules
   out a BOOTSEL/erased-boot2 state; the stuck state was a firmware-level loop.
+- **GP17 status LED:** `RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED GP17` is defined for BKB RP2040 boards,
+  but during Phase 1 gate testing on the dilemma 4x6_4_procyon, driving GP17 produced **no visible
+  output** (the module's LED phase patterns were never seen). Do not rely on it as user-facing
+  progress. The working Phase 1 indicator is the console `status=` in the probe echo; the user approved
+  an **RGB progress effect on the primary for Phase 3** as the product-facing indicator (plan §7).
 - **Master/slave role:** `split_util.c:181` `is_keyboard_master_impl()` = `usb_bus_detected()`; the
   USB-connected half is master. Standalone left half (its own USB) is master and legitimately prints
   `probe failed` since no secondary is connected.
