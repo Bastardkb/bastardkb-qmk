@@ -13,5 +13,7 @@ This is the `bastardkb-qmk` tree. Project workflow lives in `docs/superpowers/` 
 - **Run each check once.** Do not re-run a command or re-verify evidence a build, a `STATIC_ASSERT`, or an
   earlier run already proved.
 - **Before any command, ask whether it is required for this phase's single deliverable.** If not, skip it.
+- **Search inside WSL, not over the share.** The tree is a WSL share, so Windows-side search tools walk the
+  whole tree over a network FS and are slow. Use `wsl -d Ubuntu -- bash -lc 'rg -n <pattern> <path>'`.
 
 The full rule is in `docs/superpowers/phase-execution-instructions.md` ("Tooling discipline").

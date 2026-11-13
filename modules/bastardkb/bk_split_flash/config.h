@@ -27,6 +27,17 @@
 #    define RPC_S2M_BUFFER_SIZE 16
 #endif
 
+// DIAG build 3 (TEMPORARY - 2026-11-13): hold off the master's first probe until
+// the secondary has booted and run its post_init (fingerprint), so the first
+// probe cannot land in the slave's transport-up -> post_init window. This is the
+// direct H2 test: a probe against a fully-initialized slave should then succeed.
+// (The diag2 SERIAL_USART_TIMEOUT widening is reverted here - back to default.)
+#if defined(BK_SPLIT_FLASH_DIAG)
+#    ifndef BK_SPLIT_FLASH_DIAG_PROBE_DELAY_MS
+#        define BK_SPLIT_FLASH_DIAG_PROBE_DELAY_MS 6000
+#    endif
+#endif
+
 // Flash layout knobs (Phase 1+). Staging slot: the preliminary new image is
 // written here, verified, then committed into the active region. All offsets
 // are flash offsets from the XIP base (0x10000000).

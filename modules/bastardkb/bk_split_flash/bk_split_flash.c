@@ -13,6 +13,8 @@
 #include "debug.h"
 #include "timer.h"
 #include "transactions.h"
+#include "transport.h"
+#include "crc.h"
 #include "community_modules.h"
 #include "split_util.h"
 #include "hardware/regs/addressmap.h"
@@ -131,17 +133,43 @@ static void bk_split_flash_attempt_probe(void) {
 
 #ifdef BK_SPLIT_FLASH_DIAG
     // DIAG (TEMPORARY - 2026-11-13): per-attempt wire observation. dt localizes
-    // the failing phase: a ~20 ms block is the read timeout, a fast dt (<5 ms)
+    // the failing phase: a ~timeout block is the read timeout, a fast dt (<5 ms)
     // signals a handshake/id mismatch rather than a timeout.
     bk_split_flash_diag_probe_attempts++;
     xprintf("bk_split_flash: DIAG attempt #%lu t=%lu conn=%u rejects=%u\r\n", (unsigned long)bk_split_flash_diag_probe_attempts, (unsigned long)timer_read32(), is_transport_connected() ? 1u : 0u, (unsigned)bk_split_flash_probe_rejects);
     uint32_t diag_t_start = timer_read32();
-#endif
 
-    bool ok = transaction_rpc_exec(PUT_BK_SPLIT_FLASH, sizeof(probe), &probe, sizeof(echo), &echo);
+    // DIAG: replicate transaction_rpc_exec's 4 phases with per-phase logging
+    // (mirrors transactions.c:1092-1117) so we can see WHICH phase fails:
+    //   info  = PUT_RPC_INFO write      -> transport/XOR-handshake accepted?
+    //   req   = PUT_RPC_REQ_DATA write  -> request payload accepted?
+    //   exec  = EXECUTE_RPC write       -> callback invoked on the slave?
+    //   read  = GET_RPC_RESP_DATA read  -> echo received within the window?
+    rpc_sync_info_t info = {.payload = {.transaction_id = PUT_BK_SPLIT_FLASH, .m2s_length = sizeof(probe), .s2m_length = sizeof(echo)}};
+    info.checksum        = crc8(&info.payload, sizeof(info.payload));
+    split_transaction_table[PUT_RPC_REQ_DATA].initiator2target_buffer_size  = sizeof(probe);
+    split_transaction_table[GET_RPC_RESP_DATA].target2initiator_buffer_size = sizeof(echo);
+    int8_t rpc_id = PUT_BK_SPLIT_FLASH;
 
-#ifdef BK_SPLIT_FLASH_DIAG
+    uint32_t ph_t;
+    ph_t         = timer_read32();
+    bool     ph1 = transport_execute_transaction(PUT_RPC_INFO, &info, sizeof(info), NULL, 0);
+    uint32_t d1  = timer_elapsed32(ph_t);
+    ph_t         = timer_read32();
+    bool     ph2 = ph1 && transport_execute_transaction(PUT_RPC_REQ_DATA, &probe, sizeof(probe), NULL, 0);
+    uint32_t d2  = timer_elapsed32(ph_t);
+    ph_t         = timer_read32();
+    bool     ph3 = ph2 && transport_execute_transaction(EXECUTE_RPC, &rpc_id, sizeof(rpc_id), NULL, 0);
+    uint32_t d3  = timer_elapsed32(ph_t);
+    ph_t         = timer_read32();
+    bool     ph4 = ph3 && transport_execute_transaction(GET_RPC_RESP_DATA, NULL, 0, &echo, sizeof(echo));
+    uint32_t d4  = timer_elapsed32(ph_t);
+
+    bool     ok    = ph1 && ph2 && ph3 && ph4;
     uint32_t diag_dt = timer_elapsed32(diag_t_start);
+    xprintf("bk_split_flash: DIAG phases info=%u(%lu) req=%u(%lu) exec=%u(%lu) read=%u(%lu)\r\n", ph1, (unsigned long)d1, ph2, (unsigned long)d2, ph3, (unsigned long)d3, ph4, (unsigned long)d4);
+#else
+    bool ok = transaction_rpc_exec(PUT_BK_SPLIT_FLASH, sizeof(probe), &probe, sizeof(echo), &echo);
 #endif
 
     if (!ok) {
@@ -170,7 +198,7 @@ static void bk_split_flash_attempt_probe(void) {
     if (!bk_split_flash_reply_usable(echo.magic == BK_SPLIT_FLASH_MAGIC, echo.seq == probe.seq, echo.image_len)) {
         if (!bk_split_flash_unusable_reply_printed) {
             bk_split_flash_unusable_reply_printed = true;
-            xprintf("bk_split_flash: probe answered but reply is not current protocol (magic=0x%02x seq=%u len=%lu)\r\n", echo.magic, echo.seq, (unsigned long)echo.image_len);
+            xprintf("bk_split_flash: probe answered but reply is not current protocol (magic=0x%02x version=%u seq=%u status=%u len=%lu)\r\n", echo.magic, echo.version, echo.seq, echo.status, (unsigned long)echo.image_len);
         }
         xprintf("bk_split_flash: DECISION skip (secondary not running a compatible protocol) t=%lu rejects=%u\r\n", (unsigned long)timer_read32(), (unsigned)bk_split_flash_probe_rejects);
         bk_split_flash_handshake_done = true;
@@ -224,6 +252,14 @@ void housekeeping_task_bk_split_flash(void) {
     if (bk_split_flash_handshake_done) {
         return;
     }
+#ifdef BK_SPLIT_FLASH_DIAG
+    // DIAG (TEMPORARY - 2026-11-13): H2 test - do not start probing until the
+    // secondary has booted and run its post_init (fingerprint), so the first
+    // probe cannot land in the slave's transport-up -> post_init window.
+    if (!bk_split_flash_handshake_started && timer_read32() < BK_SPLIT_FLASH_DIAG_PROBE_DELAY_MS) {
+        return;
+    }
+#endif
     if (!bk_split_flash_handshake_started) {
         bk_split_flash_handshake_started    = true;
         bk_split_flash_handshake_started_at = timer_read32();

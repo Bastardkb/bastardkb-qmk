@@ -27,6 +27,10 @@ phase ends (retrospective + plan update).
   build, a `STATIC_ASSERT`, or an earlier run already proved.
 - **Before running any command, ask: is it required for this phase's single deliverable?** If not, skip it.
   This covers exploratory reads, extra builds, and re-checks; prefer reading files over running tools.
+- **Search inside WSL, not over the share.** This tree is a WSL share (`\\wsl.localhost\...`), so the
+  Windows-side search tools walk the entire tree (`lib/`, `.build`, submodules) over a network filesystem
+  and are slow. Run ripgrep natively instead, scoping the path:
+  `wsl -d Ubuntu -- bash -lc 'rg -n <pattern> <path>'`. Same for `ls`/`find` when a search would do.
 
 ## Ask the user — don't assume
 

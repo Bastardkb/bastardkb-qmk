@@ -157,6 +157,122 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
 - Diagnostic artifact: `bk_split_flash_phase2_diag.uf2` from
   `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`.
 
+### DIAG run result (2026-11-13)
+
+- Both halves on the diag image, primary USB only, power-cycle, full console. Raw sequence:
+  `DIAG conn=1 t=2202` → `DIAG probing t0=2202 own_len=93328 own_crc=0x78ff6f7b conn=1` → attempts #1..#10,
+  each `DIAG attempt #N t=… conn=1 rejects=N-1` then `DIAG attempt #N FAIL … dt=20 rejects=N conn=1`,
+  cadence ~226 ms → `DIAG conn=0 t=4468` → `DECISION skip (no reply within SPLIT_FLASH_HANDSHAKE_TIMEOUT)
+  t=10203 rejects=10`. No usable echo, no `probe answered` line, no relayed slave-handler line.
+- Reading: **every attempt fails with `dt=20 ms` = the full `SERIAL_USART_TIMEOUT` read** (the echo never
+  arrives), and the board's own split link then collapses (`conn` 1→0) and never recovers. The probe traffic
+  itself is what kills the half-duplex link → **H2** (late/no echo → wire desync), not a fingerprint/version
+  decision.
+- Ruled out: **H1** (cap raised to 200, window to 8 s; still 10 consecutive fails, no later success, no early
+  settle — settle-on-3 was not hiding a later success), **H5** (attempts ran → master role detected),
+  **H6** (`dt=20 ms`, not a fast handshake-constant mismatch).
+- Not separable in this log: **H3** (secondary on an older image whose handler also computes the CRC inline →
+  identical wire-desync signature) vs **H2**. The field that would disambiguate (`ready_before`) travels in
+  the echo, which never arrived because the failure is upstream of the echo. **H4** (peer absent) is unlikely
+  but not fully excluded: `conn=1` at t=2202 can be the `connection_errors` initial default
+  (`split_util.c:231`, `SPLIT_MAX_CONNECTION_ERRORS` default 10), though the ~2.3 s to reach `conn=0` fits a
+  peer that was answering base syncs until probing broke the link.
+- Init-order fact that makes H2 reachable on the slave: in `keyboard_init()` the slave's `split_post_init()`
+  (transport up, `keyboard.c:546`) runs **before** `keyboard_post_init_quantum()` →
+  `keyboard_post_init_modules()` (`keyboard.c:570`) where the module computes its fingerprint — so a probe
+  landing in that window still hits the inline-CRC path in the handler (`bk_split_flash.c:76`).
+
+### DIAG build 2 (2026-11-13) — H2 vs H3 discriminator
+
+- **Why:** DIAG build 1 could not separate H2 (slow-but-present handler) from H3 (secondary on an older
+  image), because the disambiguating field rode the echo that never arrived.
+- **What it adds (all `#ifdef BK_SPLIT_FLASH_DIAG`, temporary):**
+  - `config.h`: `SERIAL_USART_TIMEOUT` 20 → 200 ms, so a late echo (inline-CRC handler) can still be read
+    instead of timing out and desyncing the wire. (No board/keymap overrides it — checked 2026-11-13.)
+  - `bk_split_flash.c` master: `transaction_rpc_exec` is replaced by an explicit 4-phase replay
+    (`transport_execute_transaction` for `PUT_RPC_INFO` / `PUT_RPC_REQ_DATA` / `EXECUTE_RPC` /
+    `GET_RPC_RESP_DATA`, mirroring `transactions.c:1092-1117`) that logs each phase's ok/fail and duration:
+    `DIAG phases info=..(..) req=..(..) exec=..(..) read=..(..)`.
+  - the "reply is not current protocol" line now also prints `version` and `status`.
+- **How to read it:** `info` fails (dt≈200) → the slave's transport rejects/does not ack → handshake
+  mismatch (H3) or absent (H4). `info..exec` OK but `read` fails (dt≈200) → the slave accepted the request
+  but no echo → slow/absent handler (H2 or H3-inline). Any usable reply → `version`=2 ⇒ H2, `version`=1 ⇒ H3.
+- Artifact: `bk_split_flash_phase2_diag2.uf2`.
+- **Run result (2026-11-13, both halves on diag2):** attempt #1 (t=563, before the secondary's boot)
+  `info=1(0) req=1(0) exec=1(0) read=0(200)`; attempts #2–#4 `info=0(200)`; `conn=1` throughout; ends in
+  the timeout decision. **Reading: the failing stage is the slave→master echo (the response read), not the
+  request writes** — the request path completes in 0 ms, the echo never arrives even at 200 ms, and the
+  half-duplex link desyncs after the first probe. With both halves on the same build the transport is
+  compatible (H3/H6 excluded by construction), which leaves **H2** (late/absent echo → desync) as the
+  family. Caveat: the raised 200 ms timeout perturbed the link (probes ~2.2 s apart, later writes timing
+  out), so it was not a clean read against an up slave and the peer's `version` was never captured; H2 vs a
+  transport-level response failure is still open.
+
+### DIAG build 3 (2026-11-13) — H2 test (delayed first probe)
+
+- **Why:** diag2 localized the failure to the RPC response (echo), but the raised 200 ms timeout perturbed
+  the link. diag3 reverts `SERIAL_USART_TIMEOUT` to the default 20 ms and instead holds the master's first
+  probe until `BK_SPLIT_FLASH_DIAG_PROBE_DELAY_MS` (6000 ms) after boot, so the first probe cannot land in
+  the slave's transport-up -> post_init window. Phase logging is kept.
+- **Decision:** a probe against a fully-initialized slave that SUCCEEDS → **H2 confirmed** (the early probe
+  was the cause). A probe that still FAILS with the same `read` timeout → **H2 excluded**; it is a
+  transport/response-level problem, not the inline-CRC window.
+- Artifact: `bk_split_flash_phase2_diag3.uf2`.
+- **Run result (2026-11-13, both halves on diag3):** `DIAG probing t0=6000` (first probe well after the
+  secondary's boot/post_init), then attempt #1 `info=1(0) req=1(0) exec=1(0) read=0(20)`; attempts #2–#10
+  `info=0(20)`; `conn=1` until t=8276 then 0; ends in the timeout decision. **The post-init probe still
+  fails → H2 is EXCLUDED** (the transport-up → post_init inline-CRC window is not the cause). With H1/H5
+  (diag1), H3/H6 (same build), and H4 (base link up, `conn=1`) also excluded, **no candidate hypothesis
+  fits**: the RPC **response** (`GET_RPC_RESP_DATA`) is never delivered and the exchange desyncs the
+  half-duplex link, reproducibly, between two identical connected builds. Since the Phase 0 probe/echo
+  round-tripped cleanly, this is a Phase-2 regression at the RPC response/transport level (candidates: the
+  probe/echo grew vs Phase 0, `version` 1→2, or the `post_init` CRC work) — to be bisected.
+- **Phase 0 comparison (2026-11-13):** the existing `bk_split_flash_phase0.uf2` (both halves) round-trips
+  cleanly and continuously (`probe seq=N -> echo seq=N magic=0x5f version=1 status=0`, seq mirrored).
+  ⇒ the cable/baud/topology/serial transport are fine; the failure is a **Phase-2 code regression on the
+  RPC response path**, not environment and not H1–H6. Phase 0's echo print showed only
+  seq/magic/version/status (no `image_len`/`image_crc`), so Phase 0's probe/echo were minimal (~3/4 bytes)
+  vs Phase 2's 12/16.
+
+## Phase 2 handshake — FAILED: dead-ends and findings (2026-11-13)
+
+Phase 2's capability/fingerprint handshake **does not work on hardware** and has been reverted. A fresh
+approach is needed; what follows is what we established so a retry does not repeat it.
+
+**Symptom.** The primary prints `DECISION skip (no current-protocol reply from the secondary)` — three
+consecutive transport-level failures of the 4-phase RPC (`transaction_rpc_exec`).
+
+**Proven with temporary DIAG builds 1-3 (now reverted):**
+- The failing stage is the RPC **response** (`GET_RPC_RESP_DATA`). The request writes (`PUT_RPC_INFO`,
+  `PUT_RPC_REQ_DATA`, `EXECUTE_RPC`) complete in ~0 ms; the response read times out at the full
+  `SERIAL_USART_TIMEOUT`, and the exchange **desyncs the half-duplex link** (later transactions, then the
+  base split sync, fail). Observed as `DIAG phases info=1(0) req=1(0) exec=1(0) read=0(20)`.
+- Excluded: H1 early 3-strike settle (cap 200 + 8 s window — still no success), H2 pre-`post_init`
+  inline-CRC window (delaying the first probe to 6 s did not help), H3 wrong image and H6 build skew (both
+  halves on the same build ⇒ same `NUM_TOTAL_TRANSACTIONS`), H4 never-connected (base link up, `conn=1`),
+  H5 role mis-detect (probes ran on the master).
+- **The Phase 0 probe/echo round-trips cleanly** on the same hardware (`probe seq=N -> echo seq=N
+  magic=0x5f version=1 status=0`, seq mirrored) ⇒ cable/baud/topology/serial transport are fine. So Phase 2
+  is a **code regression on the RPC response path**, not environment.
+
+**Current Phase 2 approach (as implemented, now reverted):** `bk_split_flash.c` runs a one-shot master
+handshake — probe (`magic`/`version=2`/`seq`/`image_len`/`image_crc`) via `transaction_rpc_exec`, gated on
+`is_transport_connected()`, re-probed every 200 ms inside a 4 s (DIAG 8 s) window, settling after 3 (DIAG
+200) transport failures; the slave handler echoes its own `version`/`image_len`/`image_crc`; the master
+applies the skip policy. Both halves compute a CRC-32 over `[XIP_BASE, __flash_binary_end)` at
+`keyboard_post_init`.
+
+**Prime suspects for a retry (unresolved — the bisect was not run):**
+- the probe/echo **payload grew** vs Phase 0 (Phase 0's echo print showed only seq/magic/version/status, so
+  ~3/4 bytes; Phase 2's are 12/16) — and the response direction is exactly what fails;
+- the `post_init` CRC work;
+- `version` 1→2.
+
+**Recommendation for a fresh start:** reproduce the Phase 0 round-trip success with the *final* payload
+shape **before** adding any handshake policy, then layer the fingerprint/skip logic on top. Treat "the RPC
+response does not come back" as the first-class failure to design against, because it desyncs the link and
+is not recoverable inside the window.
+
 ## Keyboards / build target
 
 - Target board: `bastardkb/dilemma/4x6_4_procyon` (folder under `keyboards/bastardkb/dilemma/`,
