@@ -68,6 +68,12 @@ phase ends (retrospective + plan update).
 - On the user's PASS, deliver the end-of-phase retrospective:
   - what went well / what went badly
   - a TLDR for the user
+- **Leftover/redundancy review before every next phase.** Each end-of-phase review also includes a
+  code-review pass over all the work delivered so far (module code, config, host tests, plan text)
+  checking for anything redundant or leftover from earlier phases: temporary test hooks, obsolete knobs,
+  dead code paths, no-longer-true comments, superseded protocol handling. If anything is found, clean it
+  up, rebuild, and the human re-runs the affected validation gate before the next phase starts — the next
+  phase does not begin until that re-validation passes.
 - Once the user confirms, update the plan's workflow contract / checklists before the next phase.
 
 ## Process artefacts in this folder

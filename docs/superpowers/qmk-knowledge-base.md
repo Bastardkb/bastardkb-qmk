@@ -141,6 +141,21 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
 - The board's real keymap is the userspace `vendor` keymap (see userspace); "default" keymap is a bare C
   keymap with no `keymap.json`. Phase UF2s are built with `-km vendor` (user-confirmed 2026-11-12) so the
   module is already listed + console is on.
+- **Halves boot ~3 s apart on the dilemma 4x6_4 procyon (measured 2026-11-13).** When powered via the
+  split cable, the secondary comes up ~3 s after the primary starts. Any time-bound handshake/probe on the
+  primary must tolerate at least this skew or it decides before the secondary can answer; the Phase 2
+  handshake window is therefore 4000 ms with a 200 ms probe cadence (knobs
+  `SPLIT_FLASH_HANDSHAKE_TIMEOUT` / `BK_SPLIT_FLASH_PROBE_INTERVAL_MS`). Non-blocking housekeeping polling
+  keeps the primary fully usable during the wait.
+- **Split serial reads can block the main loop; RPC failures do not fool `is_transport_connected`.**
+  Each failed `serial_transport_receive` blocks its caller for up to `SERIAL_USART_TIMEOUT` (default
+  20 ms). QMK's `connection_errors` (and hence `is_transport_connected()`, split_util.c:230) is only
+  updated by the base split-sync path (`transport_master`), NOT by raw RPC (`transaction_rpc_exec`), so
+  probing a peer that is mid-boot or on different firmware repeatedly blocks the main loop for ~20 ms
+  without ever flipping "disconnected" — a module that probes on a fixed cadence can stall the primary's
+  boot for seconds (root-caused 2026-11-13 via a handshake-disabled A/B build). Rule: only run split-RPC
+  from housekeeping code when `is_transport_connected()` is already true, and settle (skip/fail) after a
+  small number of consecutive RPC failures instead of hammering the whole window.
 
 ## RP2040 flash self-write (learned 2026-11-13, Phase 1 safety core)
 

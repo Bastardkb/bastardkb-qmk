@@ -6,8 +6,9 @@
 // via the generated split_transaction_id_community_modules.inc).
 #define SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH PUT_BK_SPLIT_FLASH
 
-// RPC buffer sizing (global split RPC macros). m2s packets carry
-// opcode + seq + payload + CRC; s2m returns the capability/ACK.
+// RPC buffer sizing (global split RPC macros). m2s carries the capability probe
+// (magic/version/seq + image length + CRC-32); s2m returns the peer's own
+// version/length/CRC-32 reply.
 #ifndef RPC_M2S_BUFFER_SIZE
 #    define RPC_M2S_BUFFER_SIZE 246
 #endif
@@ -26,44 +27,26 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// TEMPORARY Phase 1 on-device test hook knobs. The hook lets the safety core be
-// exercised with one UF2 before any transport exists: hold the configured key
-// on the secondary half at power-on to run erase-staging -> stage the board's
-// own image -> verify -> arm+commit -> reboot. REMOVED in Phase 2 (replaced by
-// the capability/fingerprint handshake). The final product must not carry it.
+// Handshake knobs (Phase 2). The master's capability probe is settled by the
+// first valid reply or by this bound, whichever comes first, so the primary's
+// boot is never blocked (plan section 5 / section 13 Phase 2). The default is
+// 4000 ms because on the dilemma the secondary boots ~3 s later than the
+// primary (measured 2026-11-13); a shorter window makes the primary give up
+// before the secondary can answer. The probe never blocks the main loop: it is
+// rate-limited housekeeping work.
 // ---------------------------------------------------------------------------
-#ifndef BK_SPLIT_FLASH_TEST_ENABLE
-#    define BK_SPLIT_FLASH_TEST_ENABLE 1
+#ifndef SPLIT_FLASH_HANDSHAKE_TIMEOUT
+#    define SPLIT_FLASH_HANDSHAKE_TIMEOUT 4000 // ms; whole-probe bound, must cover the halves' boot skew
+#endif
+// Internal handshake cadence: the master re-probes every PROBE_INTERVAL_MS while
+// inside the timeout window, so a still-booting secondary is not skipped by one
+// raced probe. Not a Phase-4-finalized knob.
+#ifndef BK_SPLIT_FLASH_PROBE_INTERVAL_MS
+#    define BK_SPLIT_FLASH_PROBE_INTERVAL_MS 200
 #endif
 
-#ifndef BK_SPLIT_FLASH_TEST_KEY_ROW
-// Row 0 col 0 is QMK Bootmagic's default key on the LEFT half (the right half's
-// override is [5,0] from keyboard.json), so holding it at boot jumps to the
-// ROM bootloader before QMK runs. Use the key one row below it instead.
-#    define BK_SPLIT_FLASH_TEST_KEY_ROW 1
-#endif
-#ifndef BK_SPLIT_FLASH_TEST_KEY_COL
-#    define BK_SPLIT_FLASH_TEST_KEY_COL 0
-#endif
-
-// The trigger requires the key to be held continuously this long after boot.
-#ifndef BK_SPLIT_FLASH_TEST_HOLD_MS
-#    define BK_SPLIT_FLASH_TEST_HOLD_MS 1000
-#endif
-// Solid-LED "armed" pause before staging starts (cut power here = nothing touched).
-#ifndef BK_SPLIT_FLASH_TEST_START_DELAY_MS
-#    define BK_SPLIT_FLASH_TEST_START_DELAY_MS 3000
-#endif
-// Solid-LED "verified, about to commit" pause (cut power here = old image boots).
-#ifndef BK_SPLIT_FLASH_TEST_COMMIT_DELAY_MS
-#    define BK_SPLIT_FLASH_TEST_COMMIT_DELAY_MS 3000
-#endif
-// LED-on pause after boot2 is written, before the reboot (cut = new image boots).
-#ifndef BK_SPLIT_FLASH_TEST_REBOOT_DELAY_MS
-#    define BK_SPLIT_FLASH_TEST_REBOOT_DELAY_MS 2000
-#endif
-
-// LED phases use the board's bootloader status LED (GP17 on BKB RP2040 boards).
+// LED phases use the board's bootloader status LED (GP17 on BKB RP2040 boards);
+// best-effort during the Phase 3 commit, no longer part of the handshake.
 #ifndef BK_SPLIT_FLASH_PROGRESS_LED
 #    if defined(RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED)
 #        define BK_SPLIT_FLASH_PROGRESS_LED RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED

@@ -137,7 +137,8 @@ The plan's original "guarded core edits" are replaced by first-class module hook
 | `SPLIT_FLASH_STAGING_OFFSET` | `0x100000` (1 MiB from XIP base) | start of spare staging region |
 | `SPLIT_FLASH_MAX_IMAGE_SIZE` | `256 * 1024` | bounds the staging slot and rejects oversized images |
 | `SPLIT_FLASH_CHUNK_SIZE` | `240` | payload bytes per transaction (leaves room for opcode/seq/CRC in 255) |
-| `SPLIT_FLASH_HANDSHAKE_TIMEOUT` | `100` ms | capability probe timeout |
+| `SPLIT_FLASH_HANDSHAKE_TIMEOUT` | `4000` ms (was `100` ms until the 2026-11-13 gate found a ~3 s boot skew) | bounds the whole probe window; must exceed the halves' boot skew so a late-booting secondary can still answer |
+| `BK_SPLIT_FLASH_PROBE_INTERVAL_MS` | `200` ms (internal; not Phase-4-finalized) | cadence between probe retries inside the handshake window |
 | `SPLIT_FLASH_TRANSFER_TIMEOUT` | `60` s | whole-transfer bound (the anti-"appears hung" guard) |
 | `SPLIT_FLASH_FORCE` | off | optional "force re-clone" escape hatch |
 
@@ -202,7 +203,7 @@ The primary sends one capability probe containing: protocol version, its image l
 - CRC equal and length equal → **skip** (no re-clone; self-healing after an interrupted attempt),
 - otherwise → begin transfer.
 
-**Why an old secondary safely skips:** its `NUM_TOTAL_TRANSACTIONS` is smaller, so the new `PUT_SPLIT_FLASH` ID is rejected at `serial_protocol.c:59-61` / `:115-118`, and the XOR handshake at `:136` uses a different constant → `transport_execute_transaction` returns false. Bounded by `SPLIT_FLASH_HANDSHAKE_TIMEOUT`; the primary's boot is never blocked. With the standalone module the ID is `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH` (RPC-wrapped): old firmware without the module lacks the RPC handlers and the matching transaction table, so the probe simply fails and skips — same outcome, confirmed in Phase 0.
+**Why an old secondary safely skips:** its `NUM_TOTAL_TRANSACTIONS` is smaller, so the new `PUT_SPLIT_FLASH` ID is rejected at `serial_protocol.c:59-61` / `:115-118`, and the XOR handshake at `:136` uses a different constant → `transport_execute_transaction` returns false. Bounded by `SPLIT_FLASH_HANDSHAKE_TIMEOUT`; the primary's boot is never blocked. With the standalone module the ID is `SPLIT_TRANSACTION_IDS_MODULE_BK_SPLIT_FLASH` (RPC-wrapped): old firmware without the module lacks the RPC handlers and the matching transaction table, so the probe simply fails and skips — same outcome, confirmed in Phase 0. There is also **no compatibility handling for older builds of this module itself** (e.g. the Phase 0/1 probe/echo): a reply that does not match the current protocol is retried until the window ends and then skipped as "no reply / timeout". Unreleased intermediate versions get no support (2026-11-13); whatever the module ships is the current protocol.
 
 ## 6. Transport: one multiplexed transaction (delivered as a Community Module)
 
@@ -397,6 +398,29 @@ This applies to every phase in §13 and is the mechanism for working efficiently
 - **Record hardware/QMK facts in the knowledge base immediately** (Bootmagic, boot2 CRC32, vector-table
   offsets, split transport serviced from the main loop, GP17 invisibility).
 
+**Workflow refinements from the Phase 2 preparation (2026-11-13):**
+
+- **WSL bash from the PowerShell host strips embedded double quotes.** Commands run via
+  `wsl -d Ubuntu -- bash -lc '<cmd>'` lose every `"` inside the outer single-quoted string before bash
+  sees them, so `grep -E "a|b"` arrives as `grep -E a|b` and bash pipes the pattern pieces as commands
+  (repeatedly broke one-liners on 2026-11-13). Avoid embedded double quotes entirely in one-liners: use
+  `grep -e a -e b` instead of a quoted alternation, and no `"` inside `python3 -c "..."` / `printf`. For
+  anything complex, write a script file (Write tool) and run it, instead of fighting quoting.
+- **Gate evidence comes from the console channel, not offline re-derivation.** Do not manually compute
+  fingerprints/CRCs just to embed expected numbers in a checklist when the console prints the same value
+  at the gate and the host harness already tests the computation. Verify that a value is observable in
+  `qmk console`, leave the numeric evidence to the runtime log, and keep the checklist to what the gate
+  actually consumes (mirrors the Phase 0 "don't over-rotate on pre-provable numbers" lesson).
+- **No compatibility code for unreleased internal versions.** This module has not shipped, so there is no
+  "legacy" protocol to support: whatever the module builds is the current protocol. Do not add
+  markers/cross-version detection for earlier phase images (2026-11-13: a capability stamp + legacy-peer
+  skip were added to the Phase 2 handshake, then removed). A peer running anything else is retried until
+  the window ends and skipped as no-reply/timeout.
+- **Measure hardware timing before trusting preset timeouts.** The initial 100 ms handshake default was
+  useless because the dilemma's secondary boots ~3 s later than the primary (measured at the first Phase 2
+  gate run). Measure the halves' boot skew early and size windows from the worst observed skew; record the
+  number in the knowledge base as a hardware fact.
+
 ## 13. Phase breakdown (one UF2 + validation gate each)
 
 Every row produces exactly one UF2 for `bastardkb/dilemma/4x6_4_procyon` and stops at the validation gate described below; the agent proceeds only on a PASS report from the human partner. UF2 names below are handover labels for that single `qmk compile` output.
@@ -549,7 +573,32 @@ Paste into a fresh session:
 
 Add the capability/fingerprint probe, the runtime CRC over `[XIP_BASE, &__flash_binary_end)`, skip policy (no reply / version mismatch / identical CRC+length → skip), and the one-shot per-boot guard. No transfer yet.
 
-**Validation gate:** flash the single Phase 2 UF2 to the primary. Report the console output for three cases: (a) secondary on **old firmware** → clean skip, no hang, primary boot not blocked, keyboard fully usable; (b) secondary seeded with the **same image** → identical fingerprint → skip, no re-clone; (c) probe bounded within `SPLIT_FLASH_HANDSHAKE_TIMEOUT`. Provide the console log and PASS/FAIL. The agent proceeds only on PASS.
+**Status 2026-11-13 (rev 2):** root cause of the primary boot stall found and fixed. The original
+handshake probed on a cadence regardless of the split link state; each failed serial read blocks the
+shared main loop up to `SERIAL_USART_TIMEOUT` (20 ms), and RPC failures do NOT bump QMK's
+`connection_errors` counter (only the base sync does), so a mid-boot / mismatched peer was probed ~20
+times over the 4 s window → the primary appeared dead for ~2-3 s (typing dead, LEDs off). A/B diagnostic
+(handshake compiled out, built and flashed 2026-11-13) confirmed it: boots fast without the handshake.
+**Fix:** the master only probes while `is_transport_connected()` is true (the board's own split sync says
+the peer is up) and settles after ≤3 transport failures instead of hammering the window; a late-booting
+secondary is still caught because the connected flag flips when it answers a normal sync. The 4 s
+window still bounds the decision. Host harness PASSES, build clean, no QMK core edits. **Awaiting
+re-validation of the gate (below), including that the primary now boots as fast as stock.**
+
+**Validation gate (revised 2026-11-13):** flash the single Phase 2 UF2 to the primary only. No key needs
+pressing — the handshake is fully automatic (no trigger). Report the console output for:
+(a) secondary on **old firmware** → clean skip, no hang, keyboard fully usable. A current-module peer
+reports its fingerprint and the skip line appears once it boots; an absent/stock peer shows one
+`probe failed`, then `DECISION skip (no current-protocol reply ...)`; zero secondary → timeout skip after
+~4 s.
+(b) secondary seeded with the **same image** → after the ~3 s boot lag, expect one
+`probe seq=N -> echo ... len=<same> crc=0x<same>` followed by
+`DECISION skip (identical fingerprint ..., nothing to clone)`; exactly one decision line per boot
+(one-shot guard), also on a second boot.
+(c) **bounded probe** → the decision line lands within ~4 s of the `probing` line (`SPLIT_FLASH_HANDSHAKE_TIMEOUT`),
+silence afterwards. The ~3 s gap between `probing` and the decision is expected on this board
+(secondary boots late). **Plus (d): the primary must now boot as fast as stock — typing works
+immediately, LEDs not delayed.** Provide the console log and PASS/FAIL. The agent proceeds only on PASS.
 
 ### Phase 3 — Chunked transfer
 
@@ -617,6 +666,12 @@ Only after Phase 3 correctness: trial `SERIAL_USART_SPEED 460800`, windowed ACKs
 - Flashing the secondary through its own USB.
 - SWD-based programming or hardware changes (extra TRRS conductors, USB hub/mux, reset line).
 - Per-half different UF2 images (`uf2-split-left`/`uf2-split-right`, `flash.mk:50-64`) - unnecessary
+  without `EE_HANDS`.
+- Supporting `EE_HANDS` boards.
+plit-left`/`uf2-split-right`, `flash.mk:50-64`) - unnecessary
+  without `EE_HANDS`.
+- Supporting `EE_HANDS` boards.
+ry
   without `EE_HANDS`.
 - Supporting `EE_HANDS` boards.
 plit-left`/`uf2-split-right`, `flash.mk:50-64`) - unnecessary

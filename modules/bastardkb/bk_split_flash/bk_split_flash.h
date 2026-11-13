@@ -12,22 +12,41 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Protocol version for the capability probe/echo exchanged in Phase 0.
-#define BK_SPLIT_FLASH_PROTOCOL_VERSION 1
+// Protocol version for the capability/fingerprint probe/echo exchanged between
+// the halves. The probe carries the initiator's image length + CRC-32 and the
+// reply carries the peer's OWN version, length and CRC-32. There is no
+// cross-version compatibility: whatever this module ships is the current
+// protocol, and a reply that does not match it is treated as not-ready / not
+// current and simply retried until the handshake window ends.
+#define BK_SPLIT_FLASH_PROTOCOL_VERSION 2
+
 // Master -> slave capability probe.
 typedef struct {
-    uint8_t magic;   // BK_SPLIT_FLASH_MAGIC, sanity check
-    uint8_t version; // BK_SPLIT_FLASH_PROTOCOL_VERSION
-    uint8_t seq;     // echoed back so the round-trip is observable
+    uint8_t  magic;     // BK_SPLIT_FLASH_MAGIC, sanity check
+    uint8_t  version;   // BK_SPLIT_FLASH_PROTOCOL_VERSION
+    uint8_t  seq;       // echoed back so the round-trip is observable
+    uint32_t image_len; // initiator's image length [XIP_BASE, __flash_binary_end)
+    uint32_t image_crc; // initiator's CRC-32 over that region
 } bk_split_flash_probe_t;
 
-// Slave -> master echo reply.
+// Slave -> master capability reply.
 typedef struct {
-    uint8_t magic;   // BK_SPLIT_FLASH_MAGIC
-    uint8_t version; // BK_SPLIT_FLASH_PROTOCOL_VERSION
-    uint8_t seq;     // mirrored from the probe
-    uint8_t status;  // BK_SPLIT_FLASH_STATUS_* - capability/ack
+    uint8_t  magic;     // BK_SPLIT_FLASH_MAGIC
+    uint8_t  version;   // the peer's OWN protocol version
+    uint8_t  seq;       // mirrored from the probe
+    uint8_t  status;    // BK_SPLIT_FLASH_STATUS_* - capability/ack
+    uint32_t image_len; // peer's image length
+    uint32_t image_crc; // peer's CRC-32 over its own image
 } bk_split_flash_echo_t;
+
+// Master-side handshake decision (plan section 5 skip policy).
+enum {
+    BK_SPLIT_FLASH_DECISION_SKIP_TIMEOUT     = 0, // no reply within the handshake bound
+    BK_SPLIT_FLASH_DECISION_SKIP_INVALID     = 1, // reply does not look like a v2 peer
+    BK_SPLIT_FLASH_DECISION_SKIP_VERSION     = 2, // peer protocol version differs
+    BK_SPLIT_FLASH_DECISION_SKIP_IDENTICAL   = 3, // same length + same CRC-32 -> nothing to do
+    BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER   = 4, // fingerprints differ -> clone (Phase 3)
+};
 
 #define BK_SPLIT_FLASH_MAGIC 0x5F
 #define BK_SPLIT_FLASH_STATUS_OK 0x00
@@ -123,6 +142,27 @@ static inline bool bk_split_flash_image_plausible(const uint8_t *image, uint32_t
         return false;
     }
     return bk_split_flash_boot2_checksum_valid(image);
+}
+
+// Reply acceptability for the current protocol: magic and seq echo back, and
+// the reported image length is in the plausible range. Everything else is
+// "not a current-firmware reply" (secondary mid-boot, not-yet-ready, or a
+// peer running something else) and is retried until the handshake window ends -
+// there is deliberately no handling for older internal versions. Host-testable.
+static inline bool bk_split_flash_reply_usable(bool magic_ok, bool seq_ok, uint32_t peer_len) {
+    return magic_ok && seq_ok && bk_split_flash_len_in_range(peer_len);
+}
+
+// Plan section 5 skip policy, given peer data that already passed
+// bk_split_flash_reply_usable(). Only the version and the fingerprint decide.
+static inline uint8_t bk_split_flash_handshake_decide(uint8_t peer_version, uint32_t peer_len, uint32_t peer_crc, uint32_t my_len, uint32_t my_crc) {
+    if (peer_version != BK_SPLIT_FLASH_PROTOCOL_VERSION) {
+        return BK_SPLIT_FLASH_DECISION_SKIP_VERSION;
+    }
+    if (peer_len == my_len && peer_crc == my_crc) {
+        return BK_SPLIT_FLASH_DECISION_SKIP_IDENTICAL;
+    }
+    return BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER;
 }
 
 // ---------------------------------------------------------------------------

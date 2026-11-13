@@ -152,11 +152,72 @@ static void test_image_plausible(void) {
     CHECK(!bk_split_flash_image_plausible(img, SPLIT_FLASH_MAX_IMAGE_SIZE + 1));
 }
 
+// The probe/reply must fit the configured RPC buffer sizes (config.h).
+static void test_packet_sizes(void) {
+    CHECK(sizeof(bk_split_flash_probe_t) <= 246);
+    CHECK(sizeof(bk_split_flash_echo_t) <= 16);
+    CHECK(sizeof(bk_split_flash_probe_t) >= 3);
+}
+
+// Reply-usable filter (current protocol): magic + seq echoed and a plausible
+// image length. A reply that does not match (mid-boot secondary, or a peer on
+// different firmware) is not read further and is retried.
+static void test_reply_usable(void) {
+    CHECK(bk_split_flash_reply_usable(true, true, BK_SPLIT_FLASH_MIN_IMAGE_SIZE));
+    // Length outside the plausible image range.
+    CHECK(!bk_split_flash_reply_usable(true, true, 0));
+    CHECK(!bk_split_flash_reply_usable(true, true, BK_SPLIT_FLASH_MIN_IMAGE_SIZE - 1));
+    CHECK(!bk_split_flash_reply_usable(true, true, SPLIT_FLASH_MAX_IMAGE_SIZE + 1));
+    CHECK(!bk_split_flash_reply_usable(true, true, 0xFFFFFFFFu));
+    // Round-trip fields must match.
+    CHECK(!bk_split_flash_reply_usable(false, true, BK_SPLIT_FLASH_MIN_IMAGE_SIZE));
+    CHECK(!bk_split_flash_reply_usable(true, false, BK_SPLIT_FLASH_MIN_IMAGE_SIZE));
+}
+
+// Plan section 5 skip policy decision matrix.
+static void test_handshake_decide(void) {
+    const uint32_t my_len = 93280;
+    const uint32_t my_crc = 0x48dd14d1u;
+    // Same version + identical fingerprint -> skip.
+    CHECK(bk_split_flash_handshake_decide(2, my_len, my_crc, my_len, my_crc) == BK_SPLIT_FLASH_DECISION_SKIP_IDENTICAL);
+    // Same version + longer peer image -> transfer.
+    CHECK(bk_split_flash_handshake_decide(2, my_len + 1, my_crc, my_len, my_crc) == BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER);
+    // Same version + same length + different CRC -> transfer.
+    CHECK(bk_split_flash_handshake_decide(2, my_len, my_crc + 1, my_len, my_crc) == BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER);
+    // Version mismatch wins over an identical fingerprint.
+    CHECK(bk_split_flash_handshake_decide(1, my_len, my_crc, my_len, my_crc) == BK_SPLIT_FLASH_DECISION_SKIP_VERSION);
+    CHECK(bk_split_flash_handshake_decide(3, my_len, my_crc, my_len, my_crc) == BK_SPLIT_FLASH_DECISION_SKIP_VERSION);
+}
+
+// End-to-end fingerprint behaviour over real image buffers: a copied image is
+// identical (skip), any byte difference in a same-length image changes the CRC
+// (transfer), and a different length with identical content is still different.
+static void test_handshake_fingerprint(void) {
+    uint8_t own[BK_SPLIT_FLASH_MIN_IMAGE_SIZE + 64];
+    uint8_t peer[BK_SPLIT_FLASH_MIN_IMAGE_SIZE + 64];
+    uint32_t len = BK_SPLIT_FLASH_MIN_IMAGE_SIZE + 32; // distinct from the other tests
+
+    make_valid_image(own, len);
+    memcpy(peer, own, len); // identical secondary
+    CHECK(bk_split_flash_handshake_decide(2, len, bk_split_flash_crc32(peer, len), len, bk_split_flash_crc32(own, len)) == BK_SPLIT_FLASH_DECISION_SKIP_IDENTICAL);
+
+    peer[12] ^= 0x01; // one different byte -> different CRC
+    CHECK(bk_split_flash_handshake_decide(2, len, bk_split_flash_crc32(peer, len), len, bk_split_flash_crc32(own, len)) == BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER);
+
+    // Same content but a shorter peer image -> different fingerprint.
+    uint32_t shorter = BK_SPLIT_FLASH_MIN_IMAGE_SIZE;
+    CHECK(bk_split_flash_handshake_decide(2, shorter, bk_split_flash_crc32(peer, shorter), len, bk_split_flash_crc32(own, len)) == BK_SPLIT_FLASH_DECISION_BEGIN_TRANSFER);
+}
+
 int main(void) {
     test_crc32();
     test_len_in_range();
     test_boot2_checksum();
     test_image_plausible();
+    test_packet_sizes();
+    test_reply_usable();
+    test_handshake_decide();
+    test_handshake_fingerprint();
     if (failures) {
         printf("%d test(s) FAILED\n", failures);
         return 1;
