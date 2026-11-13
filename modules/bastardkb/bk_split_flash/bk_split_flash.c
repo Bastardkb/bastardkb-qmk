@@ -21,27 +21,12 @@
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 2);
 
 // ---------------------------------------------------------------------------
-// Phase 0 walking skeleton: probe + echo over the module's RPC transaction.
-// ---------------------------------------------------------------------------
-
-// Slave side of the RPC: reflect the probe back as an echo.
-static void bk_split_flash_slave_handler(uint8_t in_buflen, const void *in_data, uint8_t out_buflen, void *out_data) {
-    const bk_split_flash_probe_t *probe = (const bk_split_flash_probe_t *)in_data;
-    bk_split_flash_echo_t        *echo  = (bk_split_flash_echo_t *)out_data;
-
-    if (in_buflen < sizeof(*probe) || out_buflen < sizeof(*echo)) {
-        print("bk_split_flash: slave probe buffer too small\r\n");
-        return;
-    }
-
-    echo->magic   = probe->magic;
-    echo->version = probe->version;
-    echo->seq     = probe->seq;
-    echo->status  = (probe->magic == BK_SPLIT_FLASH_MAGIC) ? BK_SPLIT_FLASH_STATUS_OK : 0xFF;
-}
-
-// ---------------------------------------------------------------------------
 // TEMPORARY Phase 1 on-device test hook (removed in Phase 2).
+//
+// Non-blocking state machine: each housekeeping tick does at most one flash
+// page, so the slave's main loop (and therefore the split transport) keeps
+// running. Progress is reported to the master through the probe echo status,
+// which makes the run observable on the primary's qmk console.
 // ---------------------------------------------------------------------------
 #if BK_SPLIT_FLASH_TEST_ENABLE
 
@@ -55,105 +40,200 @@ static void bk_split_flash_slave_handler(uint8_t in_buflen, const void *in_data,
 #        define BK_FLASH_TEST_LED_TOGGLE() ((void)0)
 #    endif
 
-static void bk_split_flash_test_fail(const char *which) {
-    // Indefinite blink on failure so the state is obvious in a power-cut test.
-    xprintf("bk_split_flash: TEST FAIL at %s\r\n", which);
-    for (;;) {
-        BK_FLASH_TEST_LED_ON();
-        wait_ms(80);
-        BK_FLASH_TEST_LED_OFF();
-        wait_ms(80);
+// Echo status values while the test hook runs (0 = idle, matches Phase 0).
+enum {
+    BK_TEST_IDLE     = 0,
+    BK_TEST_ARMED    = 1,  // triggered; armed/pre-arm wait
+    BK_TEST_STAGING  = 2,  // writing pages into the staging slot
+    BK_TEST_VERIFIED = 3,  // verify passed; pre-commit pause
+    BK_TEST_COMMIT   = 4,  // commit about to run / running
+    BK_TEST_DONE     = 5,  // boot2 written; pre-reboot pause
+    BK_TEST_FAIL     = 0xF0, // OR'd with the failing stage (1..5)
+};
+
+static uint8_t  bk_test_state    = BK_TEST_IDLE;
+static uint8_t  bk_test_fail_stage;
+static uint32_t bk_test_phase_start;
+static uint32_t bk_test_len;
+static uint32_t bk_test_crc;
+static uint32_t bk_test_cursor;
+static uint32_t bk_test_last_toggle;
+
+static void bk_split_flash_test_fail_stage(uint8_t stage) {
+    bk_test_fail_stage = stage;
+    bk_test_state      = BK_TEST_FAIL;
+    bk_test_phase_start = timer_read32();
+    xprintf("bk_split_flash: TEST FAIL stage=%u\r\n", (unsigned)stage);
+}
+
+static void bk_split_flash_test_tick(void) {
+    switch (bk_test_state) {
+        case BK_TEST_IDLE: {
+            // Hold the trigger key continuously for HOLD_MS to start a run.
+            static bool     hold_seen  = false;
+            static uint32_t hold_start = 0;
+            bool held = matrix_is_on(BK_SPLIT_FLASH_TEST_KEY_ROW, BK_SPLIT_FLASH_TEST_KEY_COL);
+            if (held && !hold_seen) {
+                hold_seen  = true;
+                hold_start = timer_read32();
+            } else if (!held && hold_seen) {
+                hold_seen = false;
+            } else if (hold_seen && timer_elapsed32(hold_start) > BK_SPLIT_FLASH_TEST_HOLD_MS) {
+                hold_seen        = false;
+                bk_test_len      = bk_split_flash_active_image_len();
+                if (!bk_split_flash_len_in_range(bk_test_len)) {
+                    bk_split_flash_test_fail_stage(0);
+                    break;
+                }
+                bk_test_crc = bk_split_flash_crc32((const uint8_t *)XIP_BASE, bk_test_len);
+                xprintf("bk_split_flash: TEST start len=%lu crc=0x%08lx\r\n", (unsigned long)bk_test_len, (unsigned long)bk_test_crc);
+                // Brief triggered burst (~1 s, the only blocking part).
+                for (uint8_t i = 0; i < 4; ++i) {
+                    BK_FLASH_TEST_LED_ON();
+                    wait_ms(120);
+                    BK_FLASH_TEST_LED_OFF();
+                    wait_ms(120);
+                }
+                BK_FLASH_TEST_LED_ON();
+                bk_test_phase_start = timer_read32();
+                bk_test_state       = BK_TEST_ARMED;
+            }
+            break;
+        }
+
+        case BK_TEST_ARMED:
+            // Solid LED, non-blocking armed wait. Cut power here = nothing touched.
+            if (timer_elapsed32(bk_test_phase_start) > BK_SPLIT_FLASH_TEST_START_DELAY_MS) {
+                uint8_t st = bk_split_flash_stage_begin();
+                if (st != BK_SPLIT_FLASH_STATUS_OK) {
+                    bk_split_flash_test_fail_stage(1);
+                    break;
+                }
+                bk_test_cursor = 0;
+                bk_test_state = BK_TEST_STAGING;
+                xprintf("bk_split_flash: TEST staging\r\n");
+            }
+            break;
+
+        case BK_TEST_STAGING: {
+            uint32_t n = bk_test_len - bk_test_cursor;
+            if (n > 256u) {
+                n = 256u;
+            }
+            if (n > 0) {
+                // One page per tick keeps the main loop (and transport) alive.
+                uint8_t st = bk_split_flash_stage_bytes(bk_test_cursor, (const uint8_t *)XIP_BASE + bk_test_cursor, n);
+                if (st != BK_SPLIT_FLASH_STATUS_OK) {
+                    bk_split_flash_test_fail_stage(2);
+                    break;
+                }
+                bk_test_cursor += n;
+                if (timer_elapsed32(bk_test_last_toggle) > 100) {
+                    bk_test_last_toggle = timer_read32();
+                    BK_FLASH_TEST_LED_TOGGLE();
+                }
+                break;
+            }
+            uint8_t st = bk_split_flash_stage_end();
+            if (st != BK_SPLIT_FLASH_STATUS_OK) {
+                bk_split_flash_test_fail_stage(3);
+                break;
+            }
+            st = bk_split_flash_staged_verify(bk_test_len, bk_test_crc);
+            if (st != BK_SPLIT_FLASH_STATUS_OK) {
+                bk_split_flash_test_fail_stage(4);
+                break;
+            }
+            xprintf("bk_split_flash: TEST staged+verified\r\n");
+            BK_FLASH_TEST_LED_ON();
+            bk_test_phase_start = timer_read32();
+            bk_test_state       = BK_TEST_VERIFIED;
+            break;
+        }
+
+        case BK_TEST_VERIFIED:
+            // Solid LED, non-blocking pre-commit pause. Cut here = old image boots.
+            if (timer_elapsed32(bk_test_phase_start) > BK_SPLIT_FLASH_TEST_COMMIT_DELAY_MS) {
+                bk_test_state = BK_TEST_COMMIT;
+            }
+            break;
+
+        case BK_TEST_COMMIT: {
+            // One bounded RAM-resident section. Interrupts are off inside it, so
+            // probes briefly fail; cutting power during that blackout = BOOTSEL.
+            uint8_t st = bk_split_flash_commit(bk_test_len);
+            if (st != BK_SPLIT_FLASH_STATUS_OK) {
+                bk_split_flash_test_fail_stage(5);
+                break;
+            }
+            xprintf("bk_split_flash: TEST commit ok\r\n");
+            bk_test_phase_start = timer_read32();
+            bk_test_state       = BK_TEST_DONE;
+            break;
+        }
+
+        case BK_TEST_DONE:
+            // LED on (boot2 valid). Cut here = new (identical) image boots.
+            if (timer_elapsed32(bk_test_phase_start) > BK_SPLIT_FLASH_TEST_REBOOT_DELAY_MS) {
+                xprintf("bk_split_flash: TEST rebooting\r\n");
+                mcu_reset();
+            }
+            break;
+
+        case BK_TEST_FAIL:
+        default: {
+            // Non-blocking stage-encoded pulses: N slow blinks, then a long pause.
+            uint32_t period = (uint32_t)bk_test_fail_stage * 300u + 1500u;
+            uint32_t t      = timer_elapsed32(bk_test_phase_start) % period;
+            bool     on     = false;
+            for (uint8_t k = 0; k < bk_test_fail_stage; ++k) {
+                if (t >= (uint32_t)k * 300u && t < (uint32_t)k * 300u + 150u) {
+                    on = true;
+                }
+            }
+            if (on) {
+                BK_FLASH_TEST_LED_ON();
+            } else {
+                BK_FLASH_TEST_LED_OFF();
+            }
+            break;
+        }
     }
 }
 
-static void bk_split_flash_test_run(void) {
-    uint32_t len = bk_split_flash_active_image_len();
-    if (!bk_split_flash_len_in_range(len)) {
-        xprintf("bk_split_flash: TEST abort, bad image len=%lu\r\n", (unsigned long)len);
-        return;
+static uint8_t bk_split_flash_test_status(void) {
+    if (bk_test_state == BK_TEST_FAIL) {
+        return (uint8_t)(BK_TEST_FAIL | bk_test_fail_stage);
     }
-    uint32_t crc = bk_split_flash_crc32((const uint8_t *)XIP_BASE, len);
-    xprintf("bk_split_flash: TEST start len=%lu crc=0x%08lx\r\n", (unsigned long)len, (unsigned long)crc);
-
-    // Phase: solid LED = armed, wait for the "cut before arm" case.
-    BK_FLASH_TEST_LED_ON();
-    wait_ms(BK_SPLIT_FLASH_TEST_START_DELAY_MS);
-
-    uint8_t st = bk_split_flash_stage_begin();
-    if (st != BK_SPLIT_FLASH_STATUS_OK) {
-        bk_split_flash_test_fail("stage_begin");
-    }
-
-    // Phase: blink = staging. Cut power here -> old image intact, re-clone later.
-    uint32_t      off         = 0;
-    uint32_t      last_toggle = 0;
-    while (off < len) {
-        uint32_t n = len - off;
-        if (n > 256u) {
-            n = 256u;
-        }
-        st = bk_split_flash_stage_bytes(off, (const uint8_t *)XIP_BASE + off, n);
-        if (st != BK_SPLIT_FLASH_STATUS_OK) {
-            bk_split_flash_test_fail("stage_bytes");
-        }
-        off += n;
-        if (timer_elapsed32(last_toggle) > 100) {
-            last_toggle = timer_read32();
-            BK_FLASH_TEST_LED_TOGGLE();
-        }
-    }
-    st = bk_split_flash_stage_end();
-    if (st != BK_SPLIT_FLASH_STATUS_OK) {
-        bk_split_flash_test_fail("stage_end");
-    }
-
-    st = bk_split_flash_staged_verify(len, crc);
-    if (st != BK_SPLIT_FLASH_STATUS_OK) {
-        bk_split_flash_test_fail("staged_verify");
-    }
-    xprintf("bk_split_flash: TEST staged+verified\r\n");
-
-    // Phase: solid LED again = verified, pre-commit pause. Cut here -> old boots.
-    BK_FLASH_TEST_LED_ON();
-    wait_ms(BK_SPLIT_FLASH_TEST_COMMIT_DELAY_MS);
-
-    // Phase: LED goes OFF inside the commit and stays off until boot2 lands.
-    // Cut while off -> ROM BOOTSEL. The LED is toggled by the RAM-resident
-    // commit writer itself, so the window covers erase + copy + boot2.
-    st = bk_split_flash_commit(len);
-    if (st != BK_SPLIT_FLASH_STATUS_OK) {
-        bk_split_flash_test_fail("commit");
-    }
-
-    // Phase: LED on = boot2 written. Cut here -> new (identical) image boots.
-    wait_ms(BK_SPLIT_FLASH_TEST_REBOOT_DELAY_MS);
-    xprintf("bk_split_flash: TEST commit ok, rebooting\r\n");
-    mcu_reset();
-}
-
-// Returns true the first time the trigger key has been held long enough.
-static bool bk_split_flash_test_trigger_passed(void) {
-    static bool      done       = false;
-    static bool      hold_seen  = false;
-    static uint32_t  hold_start = 0;
-    if (done) {
-        return false;
-    }
-    bool held = matrix_is_on(BK_SPLIT_FLASH_TEST_KEY_ROW, BK_SPLIT_FLASH_TEST_KEY_COL);
-    if (held && !hold_seen) {
-        hold_seen  = true;
-        hold_start = timer_read32();
-    } else if (!held && hold_seen) {
-        hold_seen = false;
-    }
-    if (hold_seen && timer_elapsed32(hold_start) > BK_SPLIT_FLASH_TEST_HOLD_MS) {
-        done = true;
-        return true;
-    }
-    return false;
+    return bk_test_state;
 }
 
 #endif // BK_SPLIT_FLASH_TEST_ENABLE
+
+// ---------------------------------------------------------------------------
+// Phase 0 walking skeleton: probe + echo over the module's RPC transaction.
+// ---------------------------------------------------------------------------
+
+// Slave side of the RPC: reflect the probe back as an echo. While the Phase 1
+// test hook runs, `status` additionally reports the hook's state (0 = idle).
+static void bk_split_flash_slave_handler(uint8_t in_buflen, const void *in_data, uint8_t out_buflen, void *out_data) {
+    const bk_split_flash_probe_t *probe = (const bk_split_flash_probe_t *)in_data;
+    bk_split_flash_echo_t        *echo  = (bk_split_flash_echo_t *)out_data;
+
+    if (in_buflen < sizeof(*probe) || out_buflen < sizeof(*echo)) {
+        print("bk_split_flash: slave probe buffer too small\r\n");
+        return;
+    }
+
+    echo->magic   = probe->magic;
+    echo->version = probe->version;
+    echo->seq     = probe->seq;
+#if BK_SPLIT_FLASH_TEST_ENABLE
+    echo->status = (probe->magic == BK_SPLIT_FLASH_MAGIC) ? bk_split_flash_test_status() : 0xFF;
+#else
+    echo->status = (probe->magic == BK_SPLIT_FLASH_MAGIC) ? BK_SPLIT_FLASH_STATUS_OK : 0xFF;
+#endif
+}
 
 void keyboard_post_init_bk_split_flash(void) {
     transaction_register_rpc(PUT_BK_SPLIT_FLASH, bk_split_flash_slave_handler);
@@ -192,9 +272,7 @@ void housekeeping_task_bk_split_flash(void) {
             print("bk_split_flash: housekeeping on slave half\r\n");
         }
 #if BK_SPLIT_FLASH_TEST_ENABLE
-        if (bk_split_flash_test_trigger_passed()) {
-            bk_split_flash_test_run();
-        }
+        bk_split_flash_test_tick();
 #endif
     }
 }

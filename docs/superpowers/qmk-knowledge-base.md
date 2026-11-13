@@ -174,8 +174,8 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   to pulse it from the RAM-resident commit (configure SIO output beforehand via pico `gpio_set_function`/
   `gpio_set_dir`).
 - **Phase 1 build facts:** `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor` builds the module
-  (`bk_split_flash_flash.c` is added with `SRC +=` in the module `rules.mk`). Phase 1 image: len 93136,
-  crc32 `0x9d33fa25` (~91 KiB binary, UF2 186368 B — comfortably under `SPLIT_FLASH_MAX_IMAGE_SIZE`).
+  (`bk_split_flash_flash.c` is added with `SRC +=` in the module `rules.mk`). Phase 1 image: len 93184,
+  crc32 `0xc3fd5182` (~91 KiB binary, UF2 188416 B — comfortably under `SPLIT_FLASH_MAX_IMAGE_SIZE`).
   `bk_flash_page_buf` + `.time_critical` commit cost ~0.6 KiB RAM; `.bss` was already ~256 KiB (RGB/VIA
   vendor keymap) — RAM is tight, watch it in later phases.
 - **RP2040 boot2 checksum (verified 2026-11-13 empirically against all six prebuilt blobs in
@@ -188,6 +188,31 @@ Date: 2026-11-12 (Phase 0 of the split-flash clone project).
   table starts at 0x100 — the initial SP word is at image+0x100 and the reset vector at image+0x104 (a
   real Phase-1 image: sp=0x20040400, pc=0x100002c5). The module's `bk_split_flash_image_plausible()`
   reads those offsets (build independent), plus the boot2 checksum.
+- **Dilemma Bootmagic (root cause of the "dead secondary" gate symptom, found 2026-11-13):**
+  `keyboards/bastardkb/dilemma/4x6_4_procyon/keyboard.json` enables full bootmagic with
+  `split.bootmagic.matrix = [5, 0]`. That value generates **only** `BOOTMAGIC_ROW_RIGHT 5` /
+  `BOOTMAGIC_COLUMN_RIGHT 0` in `info_config.h`; the left half falls back to `quantum/bootmagic/bootmagic.h`
+  defaults `BOOTMAGIC_ROW 0` / `BOOTMAGIC_COLUMN 0`. `bootmagic.c:46-56` checks
+  `matrix_get_row(row) & (1<<col)` on boot and calls `bootloader_jump()` — so **holding L00 (left top-left)
+  at boot puts that half into RP2040 ROM BOOTSEL before QMK runs** (no RGB/keys/transport; `probe failed`
+  forever on the primary; clears only on a power cycle without that key). Confirmed identical on the stock
+  image — nothing to do with `bk_split_flash`. Hence the Phase 1 test trigger was moved to `(1,0)` (the key
+  directly below the top-left). Useful corollary: hold L00 while plugging that half's own USB to enter
+  BOOTSEL for flashing without double-tap.
+- **Split transport is serviced from the main loop:** `quantum/matrix_common.c:112` calls
+  `transport_slave(...)` on the slave half. A test hook that blocks housekeeping therefore also kills
+  the split link — the master prints `probe failed (secondary not connected?)` forever, the slave's
+  RGB/keys freeze, and the state clears only on a power cycle (fresh boot, no key held); it never
+  self-recovers because `mcu_reset()` is never reached. **Phase 1 hook was reworked (2026-11-13) into a
+  non-blocking state machine**: one flash page per housekeeping tick, and its state is reported through
+  the probe echo `status=` field (0 idle, 1 armed, 2 staging, 3 verified, 4 commit, 5 done,
+  241..245 = fail stage). If the trigger key is held through a reboot, the hook re-triggers — release
+  once `status=1` appears. User observation: a left half that is dead for a full minute and only
+  recovers via unplug/replug (then enumerates as a normal keyboard standalone, NOT `RPI-RP2`) rules
+  out a BOOTSEL/erased-boot2 state; the stuck state was a firmware-level loop.
+- **Master/slave role:** `split_util.c:181` `is_keyboard_master_impl()` = `usb_bus_detected()`; the
+  USB-connected half is master. Standalone left half (its own USB) is master and legitimately prints
+  `probe failed` since no secondary is connected.
 
 ## Misc
 

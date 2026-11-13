@@ -37,7 +37,10 @@
 #endif
 
 #ifndef BK_SPLIT_FLASH_TEST_KEY_ROW
-#    define BK_SPLIT_FLASH_TEST_KEY_ROW 0
+// Row 0 col 0 is QMK Bootmagic's default key on the LEFT half (the right half's
+// override is [5,0] from keyboard.json), so holding it at boot jumps to the
+// ROM bootloader before QMK runs. Use the key one row below it instead.
+#    define BK_SPLIT_FLASH_TEST_KEY_ROW 1
 #endif
 #ifndef BK_SPLIT_FLASH_TEST_KEY_COL
 #    define BK_SPLIT_FLASH_TEST_KEY_COL 0
