@@ -21,6 +21,11 @@ together. Then read, in order:
 5. **Read the core call site, not just the header.** Before relying on any QMK API, hook, or init-time
    ordering, read the exact place core invokes it (argument semantics, call order); a signature alone can
    disagree with the real call. Record new findings in the knowledge base.
+6. **Keep every transaction callback O(1).** A slave callback runs in the link thread and must return well
+   inside `SERIAL_USART_TIMEOUT` (20 ms default), or the master gives up. Do long work (erase, whole-buffer
+   read-back/CRC, big loops) outside the round-trip — before the stream, or deferred into
+   `housekeeping_task` with a master poll — or chunk it so each callback stays tiny. Do not size a callback
+   by estimate; treat anything not obviously tiny as forbidden.
 
 ## Tooling discipline (always apply)
 
@@ -41,6 +46,8 @@ together. Then read, in order:
   Prefer reading files over running tools.
 - **Search inside WSL, not over the share.** The tree is a WSL share, so Windows-side search tools walk the
   whole tree over a network FS and are slow. Use `wsl -d Ubuntu -- bash -lc 'rg -n <pattern> <path>'`.
+- **Prefer surgical edits over whole-file rewrites.** When a rewrite is unavoidable, record any non-obvious
+  values you cannot diff (e.g. an API-version assert) from the knowledge base before you start.
 
 ## Ask the user — don't assume
 
@@ -89,6 +96,19 @@ Before you declare a step done, review your own work:
 - Confirm the change matches the plan's step and touches nothing outside its scope.
 - Confirm the deliverable builds clean (compile once) and that pure logic has a native test where practical.
 - Confirm the expected console evidence actually appears in the intended channel.
+
+## Final cleanup pass (before the validation gate)
+
+The last thing before you hand over for validation: **re-read the code you changed as a whole, and against
+this step's plan wording** (not just the diff), with maintenance eyes.
+
+- Look for anything left over from earlier steps (dead code, obsolete knobs, stale names/comments, redundant
+  state or repetition) and anything the step's instructions imply that the code does not yet reflect.
+- Apply the cleanup. Prefer the smallest change that removes the clutter; do not refactor beyond the step's
+  scope, and do not change behaviour without asking the user.
+- If you changed any source, **rebuild once and re-snapshot the golden** so the shipped artefact matches the
+  source (the "build once" rule applies to a build that is not superseded by this cleanup).
+- Only then proceed to the handoff.
 
 ## Handoff to the user (every deliverable)
 

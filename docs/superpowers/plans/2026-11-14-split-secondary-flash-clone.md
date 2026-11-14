@@ -20,7 +20,7 @@ behaviour changes.**
 - No automatic fingerprint / handshake / version negotiation — the trigger is explicit. *(Under revision:
   see work step 5 — user wants an automatic trigger.)*
 - No transferring a foreign image (only the master's own image).
-- No progress UI beyond a minimal indicator.
+- No progress UI beyond a minimal indicator (the LED indicator defined in work step 7).
 - No EEPROM / handedness semantics changes.
 - No baud tuning (stay at 230400).
 
@@ -99,6 +99,20 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
 3. **Write to staging flash.** Slave writes each chunk into the staging slot (erase staging first) and the
    result is verified by read-back / CRC. Transport vs. flash integrity are reported by **distinct markers**,
    so a failure here is unambiguously a flash bug.
+   - **STATUS: DONE (2026-11-14).** Hardware PASS on `bastardkb/dilemma/4x6_4_procyon` (`-km vendor`): two
+     consecutive runs each printed `BKCLONE: step=3 transport chunks=402 bytes=92648 crc=0x289E6CF8
+     slave=0x289E6CF8 ok` **and** `BKCLONE: step=3 flash bytes=92648 crc=0x289E6CF8 readback=0x289E6CF8 ok`.
+     This UF2 (`bk_split_flash_step3.uf2`) is the **golden known-good**.
+   - Confirmed knobs: staging slot at flash offset `0x100000` (1 MiB), erased once on the secondary at
+     `keyboard_post_init` (a 4 KiB-sector erase can't run inside a transaction — IRQs off stalls the split
+     thread past the 20 ms read timeout, so it runs ahead of the stream). New `seq` control ops on top of
+     step 2: `VERIFY=0xFFFFFFFE` returns a CRC-32 of the staging **read-back**; `ack LEN_ERR=0xFFFFFFFD`
+     rejects a begin whose length exceeds the erased slot. The slot is verified **per 256 B page as it is
+     written** (read each page back, fold into a running CRC-32) so the end-of-stream VERIFY op is O(1) and
+     cannot time out — a whole-slot read-back in one callback exceeded the 20 ms budget. No commit, no
+     reboot, no trigger; keyboard stayed usable. Each run prints **two** distinct markers (transport + flash),
+     which is the step-3 intent even though the harness's "exactly one marker line" rule is written for the
+     single-verdict steps.
 4. **Commit + reboot.** Verify, then commit (erase active, copy, boot2 last), then reboot the secondary
    into the new image.
 5. **Trigger.** Wire the trigger to start the whole flow.
@@ -107,6 +121,23 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      fingerprint vs. copy-on-every-boot) still to be decided; this supersedes the "explicit trigger" wording
      once decided. Either way a deferred wait is needed for the ~3 s master→secondary boot skew.
 6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
+
+7. **Visual indicator (LED).** Give the user an on-keyboard indication of a running master→secondary clone,
+   using the keyboard's addressable LEDs (RGB matrix / underglow) — this is the "minimal indicator" carved
+   out in Non-goals. Today the only feedback is the console marker line, which needs `qmk console` attached.
+   - **Where: master side only.** The secondary must not drive LEDs from the transfer path: its flash write
+     runs in the split protocol thread, and it reboots at commit (its LEDs are wiped mid-flow). The master
+     drives the flow from `housekeeping_task_bk_split_flash`, so the indication lives there.
+   - **Hardware:** the procyon has `rgb_matrix` (ws2812 on GP10, `split_count: [52, 52]`) — see
+     `keyboards/bastardkb/dilemma/4x6_4_procyon/keyboard.json`. Use the `rgb_matrix` indicator API rather
+     than poking the driver buffers directly.
+   - **States (design to confirm with the user before implementing):** idle = unchanged stock animations
+     (the Objective still holds: no behaviour outside the trigger); in progress = a distinct animated
+     colour for the stream duration (~5–7 s); success = brief confirmation; failure = a distinct
+     colour/pattern so a failed verify is visible without a console.
+   - **Assertion:** flash both halves, trigger the flow, and confirm the keyboard shows the in-progress
+     indication for the duration, then the success indication at completion, then returns to normal.
+     Print one marker (`BKCLONE: step=7 …`) alongside the visual state.
 
 ## Harness / test protocol
 
@@ -118,7 +149,7 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   `qmk compile` copies its output over `<QMK_HOME>/<name>.uf2` **and** `<QMK_USERSPACE>/<name>.uf2`, so an
   earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
   distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
-  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step2.uf2`.
+  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step3.uf2`.
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)

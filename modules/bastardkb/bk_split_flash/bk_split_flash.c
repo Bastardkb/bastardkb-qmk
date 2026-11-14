@@ -9,9 +9,13 @@
 #include "crc.h"
 #include "community_modules.h"
 
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "hardware/regs/addressmap.h"
+
 #include "bk_split_flash.h"
 
-ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 0, 0);
+ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 2);
 
 // Transaction id value from the generated serial_transaction_id enum.
 #define BK_SPLIT_FLASH_TRANSACTION PUT_BK_SPLIT_FLASH
@@ -24,25 +28,104 @@ extern const uint8_t __flash_binary_end[];
 
 STATIC_ASSERT(sizeof(bk_split_flash_m2s_t) == BK_SPLIT_FLASH_M2S_SIZE, "m2s chunk must be full-size");
 STATIC_ASSERT(sizeof(bk_split_flash_s2m_t) == BK_SPLIT_FLASH_S2M_SIZE, "s2m ack size mismatch");
+// Keep the staging slot clear of the wear-leveling EEPROM region (base 0x1FE000
+// on this board; see the knowledge base's flash-size facts).
+STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET + BK_SPLIT_FLASH_STAGING_MAX <= 0x1FE000u, "staging overlaps the wear-leveling EEPROM");
 
 // Reflected CRC-32 (poly 0xEDB88320, init 0xFFFFFFFF, xorout 0xFFFFFFFF). QMK's
-// quantum/crc.c only offers a whole-buffer CRC-8, so both halves use this
-// incremental CRC-32 instead; the identical code on both halves is what makes the
-// master's and the slave's values directly comparable.
-static uint32_t bk_crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
+// quantum/crc.c only offers a whole-buffer CRC-8, so both halves use this table
+// driven CRC-32: the master over the bytes it sends, the slave over the bytes it
+// receives and over the staging read-back. The contiguous read-back is ~90 KiB,
+// so a table (rather than the bit-by-bit form) keeps it well inside the 20 ms
+// transport read timeout.
+static uint32_t bk_crc32_table[256];
+static bool     bk_crc32_table_ready;
+
+static void bk_crc32_build_table(void) {
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
         for (uint8_t bit = 0; bit < 8; bit++) {
-            crc = (crc >> 1) ^ ((crc & 1u) ? 0xEDB88320u : 0u);
+            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
         }
+        bk_crc32_table[i] = c;
+    }
+    bk_crc32_table_ready = true;
+}
+
+static uint32_t bk_crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
+    if (!bk_crc32_table_ready) {
+        bk_crc32_build_table();
+    }
+    for (size_t i = 0; i < len; i++) {
+        crc = bk_crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
     return crc;
 }
 
-// Runs in the slave's split protocol thread. The passed lengths are ignored: the
-// sizes are fixed in the transaction table (the core passes the m2s size for the out
-// size too, so they are not trustworthy here). Only a rolling CRC-32 and a little
-// stream state are kept -- never a copy of the image.
+// Final XOR-out of the reflected CRC-32. Both halves keep the raw accumulator
+// (init 0xFFFFFFFF, no final xor) while streaming and apply this once at the end.
+static inline uint32_t bk_crc32_finalize(uint32_t crc) {
+    return crc ^ 0xFFFFFFFFu;
+}
+
+// --- Staging slot -------------------------------------------------------------
+
+// Staging is programmed one 256-byte flash page at a time. Chunks arrive 231
+// bytes wide, so received bytes are buffered until a page is complete; only a
+// single page lives in RAM at once. `bk_staged` counts bytes appended so far, so
+// the page being filled always starts at the 256-aligned offset
+// `bk_staged - bk_page_len`.
+static uint8_t  bk_page[FLASH_PAGE_SIZE];
+static uint32_t bk_page_len;
+static uint32_t bk_staged;
+static uint32_t bk_readback_crc; // running CRC-32 of the bytes read back from staging
+
+// Program one 256-byte page, then read it back and fold its `valid_len` data
+// bytes into the read-back CRC. Verifying a page at a time (rather than reading
+// the whole ~90 KiB slot in one callback) keeps each read-back cheap enough to run
+// during the stream, so the final VERIFY is O(1) and cannot blow the 20 ms
+// transport read timeout.
+static void bk_page_program(uint32_t staging_offset, uint32_t valid_len) {
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_program(BK_SPLIT_FLASH_STAGING_OFFSET + staging_offset, bk_page, FLASH_PAGE_SIZE);
+    restore_interrupts(ints);
+
+    const uint8_t *readback = (const uint8_t *)(XIP_BASE + BK_SPLIT_FLASH_STAGING_OFFSET + staging_offset);
+    bk_readback_crc         = bk_crc32_update(bk_readback_crc, readback, valid_len);
+}
+
+static void bk_stage_flush_full_page(void) {
+    bk_page_program(bk_staged - FLASH_PAGE_SIZE, FLASH_PAGE_SIZE);
+    bk_page_len = 0;
+}
+
+static void bk_stage_flush_partial_page(void) {
+    if (bk_page_len == 0) {
+        return;
+    }
+    uint32_t valid = bk_page_len; // data bytes in the last, short page
+    // Pad the final short page with erased-flash (0xFF) fill.
+    memset(bk_page + bk_page_len, 0xFF, FLASH_PAGE_SIZE - bk_page_len);
+    bk_page_program(bk_staged - bk_page_len, valid);
+    bk_page_len = 0;
+}
+
+static void bk_stage_append(const uint8_t *data, uint32_t len) {
+    for (uint32_t i = 0; i < len; i++) {
+        bk_page[bk_page_len++] = data[i];
+        bk_staged++;
+        if (bk_page_len == FLASH_PAGE_SIZE) {
+            bk_stage_flush_full_page();
+        }
+    }
+}
+
+// --- Slave --------------------------------------------------------------------
+
+// Runs in the slave's split protocol thread. The passed lengths are ignored (the
+// core passes the m2s size for the out size too, so they are not trustworthy
+// here); sizes are fixed in the transaction table. Only the rolling CRC-32, the
+// page-assembly buffer, and a few counters are kept -- never a whole-image copy.
 typedef struct {
     bool     active;
     uint32_t total;
@@ -52,6 +135,9 @@ typedef struct {
 
 static bk_slave_stream_t bk_slave;
 
+// Bytes erased at post-init (0 = staging unavailable; begin is then rejected).
+static uint32_t bk_staging_erased;
+
 static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, const void *initiator2target_buffer, uint8_t target2initiator_buffer_size, void *target2initiator_buffer) {
     (void)initiator2target_buffer_size;
     (void)target2initiator_buffer_size;
@@ -60,21 +146,39 @@ static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, 
     bk_split_flash_s2m_t       *s2m = (bk_split_flash_s2m_t *)target2initiator_buffer;
 
     if (m2s->seq == BK_SPLIT_FLASH_SEQ_BEGIN) {
+        // (Re)initialise the stream even when the request is rejected, so no state
+        // from an earlier run lingers.
+        bk_slave.active   = false;
+        bk_slave.total    = 0;
+        bk_slave.next_seq = 0;
+        bk_slave.crc      = 0xFFFFFFFFu;
+        bk_staged         = 0;
+        bk_page_len       = 0;
+        bk_readback_crc   = 0xFFFFFFFFu;
+
+        if (bk_staging_erased == 0 || m2s->offset == 0 || m2s->offset > bk_staging_erased) {
+            s2m->ack = BK_SPLIT_FLASH_ACK_LEN_ERR;
+            return;
+        }
         bk_slave.active   = true;
         bk_slave.total    = m2s->offset;
         bk_slave.next_seq = 1;
-        bk_slave.crc      = 0xFFFFFFFFu;
         s2m->ack          = BK_SPLIT_FLASH_ACK_BEGIN;
         return;
     }
 
     if (m2s->seq == BK_SPLIT_FLASH_SEQ_REPORT) {
-        s2m->ack = bk_slave.crc ^ 0xFFFFFFFFu;
+        s2m->ack = bk_crc32_finalize(bk_slave.crc); // rolling CRC-32 over the received bytes
         return;
     }
 
-    // Data chunk: in order, CRC-8 intact, and within the declared image length.
-    if (!bk_slave.active || m2s->seq != bk_slave.next_seq || m2s->offset >= bk_slave.total) {
+    if (m2s->seq == BK_SPLIT_FLASH_SEQ_VERIFY) {
+        s2m->ack = bk_crc32_finalize(bk_readback_crc); // CRC-32 of what the staging read-back returned
+        return;
+    }
+
+    // Data chunk: in order, contiguous, CRC-8 intact, within the declared length.
+    if (!bk_slave.active || m2s->seq != bk_slave.next_seq || m2s->offset != bk_staged) {
         s2m->ack = BK_SPLIT_FLASH_ACK_SEQ_ERR;
         return;
     }
@@ -90,12 +194,16 @@ static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, 
     }
 
     bk_slave.crc = bk_crc32_update(bk_slave.crc, m2s->data, valid);
+    bk_stage_append(m2s->data, valid);
+    if (bk_staged == bk_slave.total) {
+        bk_stage_flush_partial_page(); // last, possibly short, page
+    }
     bk_slave.next_seq++;
     s2m->ack = m2s->seq;
 }
 
-// Registered on both halves at post-init. Reuses the RPC shmem buffers (a module has
-// no shared-memory buffer of its own) with the module's own fixed sizes.
+// Registered on both halves at post-init. Reuses the RPC shmem buffers (a module
+// has no shared-memory buffer of its own) with the module's own fixed sizes.
 static void bk_split_flash_register_transaction(void) {
     split_transaction_desc_t *trans = &split_transaction_table[BK_SPLIT_FLASH_TRANSACTION];
 
@@ -106,13 +214,43 @@ static void bk_split_flash_register_transaction(void) {
     trans->slave_callback               = bk_split_flash_slave_callback;
 }
 
-// --- Master: drive one stream, one transaction per housekeeping call -------------
+// Erase the staging slot on the secondary, ahead of the stream: a 4 KiB sector
+// erase takes tens of ms and would blow the 20 ms transport read timeout if done
+// inside a transaction, so it runs once here instead. Interrupts are disabled for
+// the erase (XIP is off while it runs).
+static void bk_split_flash_prepare_staging(void) {
+    uint32_t len     = (uint32_t)(__flash_binary_end - __flash_binary_start);
+    uint32_t rounded = (len + FLASH_SECTOR_SIZE - 1) & ~(uint32_t)(FLASH_SECTOR_SIZE - 1);
+
+    if (len == 0 || rounded > BK_SPLIT_FLASH_STAGING_MAX) {
+        bk_staging_erased = 0;
+        return;
+    }
+
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(BK_SPLIT_FLASH_STAGING_OFFSET, rounded);
+    restore_interrupts(ints);
+    bk_staging_erased = rounded;
+}
+
+void keyboard_post_init_bk_split_flash(void) {
+    bk_split_flash_register_transaction();
+
+    // The master streams its own image to the secondary, so only the secondary
+    // needs a staging slot.
+    if (!is_keyboard_master()) {
+        bk_split_flash_prepare_staging();
+    }
+}
+
+// --- Master: drive one stream, one transaction per housekeeping call -----------
 
 typedef enum {
     BK_STREAM_IDLE = 0,
     BK_STREAM_BEGIN,
     BK_STREAM_DATA,
     BK_STREAM_REPORT,
+    BK_STREAM_VERIFY,
 } bk_stream_phase_t;
 
 static bk_stream_phase_t bk_phase;
@@ -123,16 +261,29 @@ static uint32_t          bk_chunk_count;
 static uint32_t          bk_next_seq;
 static uint32_t          bk_sent_crc;    // running CRC-32 of the bytes sent so far
 
-static void bk_marker(bool ok, const char *reason, uint32_t at, uint32_t slave_crc) {
-    uint32_t own_crc = bk_sent_crc ^ 0xFFFFFFFFu;
+// Two distinct markers: `transport` covers the link (the slave's rolling CRC-32
+// of the bytes it received vs. the master's CRC-32 of the bytes it sent), while
+// `flash` covers the staging slot (the CRC-32 of the staging read-back vs. that
+// same expected value). So a failing `flash` marker with a passing `transport`
+// marker is unambiguously a flash-write bug.
+static void bk_transport_marker(bool ok, const char *reason, uint32_t slave_crc) {
+    uint32_t own_crc = bk_crc32_finalize(bk_sent_crc);
 
     if (ok) {
-        xprintf("BKCLONE: step=2 chunks=%u bytes=%u crc=0x%08X slave=0x%08X ok\n", (unsigned)bk_chunk_count, (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)slave_crc);
+        xprintf("BKCLONE: step=3 transport chunks=%u bytes=%u crc=0x%08X slave=0x%08X ok\n", (unsigned)bk_chunk_count, (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)slave_crc);
     } else {
-        xprintf("BKCLONE: step=2 chunks=%u bytes=%u crc=0x%08X slave=0x%08X FAIL at=%u reason=%s\n", (unsigned)bk_chunk_count, (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)slave_crc, (unsigned)at, reason);
+        xprintf("BKCLONE: step=3 transport chunks=%u bytes=%u crc=0x%08X slave=0x%08X FAIL reason=%s\n", (unsigned)bk_chunk_count, (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)slave_crc, reason);
     }
+}
 
-    bk_phase = BK_STREAM_IDLE;
+static void bk_flash_marker(bool ok, const char *reason, uint32_t readback_crc) {
+    uint32_t own_crc = bk_crc32_finalize(bk_sent_crc);
+
+    if (ok) {
+        xprintf("BKCLONE: step=3 flash bytes=%u crc=0x%08X readback=0x%08X ok\n", (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)readback_crc);
+    } else {
+        xprintf("BKCLONE: step=3 flash bytes=%u crc=0x%08X readback=0x%08X FAIL reason=%s\n", (unsigned)bk_image_len, (unsigned)own_crc, (unsigned)readback_crc, reason);
+    }
 }
 
 static void bk_stream_start(void) {
@@ -141,7 +292,13 @@ static void bk_stream_start(void) {
     bk_next_seq    = 1;
     bk_sent_crc    = 0xFFFFFFFFu;
     bk_run_at_ms   = timer_read32() + BK_SPLIT_FLASH_RUN_PERIOD_MS;
-    bk_phase       = BK_STREAM_BEGIN;
+
+    if (bk_image_len == 0) {
+        bk_flash_marker(false, "empty", 0);
+        bk_phase = BK_STREAM_IDLE;
+    } else {
+        bk_phase = BK_STREAM_BEGIN;
+    }
 }
 
 static void bk_stream_step(void) {
@@ -156,8 +313,15 @@ static void bk_stream_step(void) {
             bool ok = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
             if (ok && s2m.ack == BK_SPLIT_FLASH_ACK_BEGIN) {
                 bk_phase = BK_STREAM_DATA;
+            } else if (!ok) {
+                bk_transport_marker(false, "begin-tx", 0);
+                bk_phase = BK_STREAM_IDLE;
+            } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
+                bk_flash_marker(false, "len", 0);
+                bk_phase = BK_STREAM_IDLE;
             } else {
-                bk_marker(false, ok ? "begin" : "tx", 0, s2m.ack);
+                bk_transport_marker(false, "begin-ack", s2m.ack);
+                bk_phase = BK_STREAM_IDLE;
             }
             break;
         }
@@ -187,7 +351,8 @@ static void bk_stream_step(void) {
             }
 
             if (reason != NULL) {
-                bk_marker(false, reason, m2s.seq, s2m.ack);
+                bk_transport_marker(false, reason, s2m.ack);
+                bk_phase = BK_STREAM_IDLE;
                 break;
             }
 
@@ -202,23 +367,36 @@ static void bk_stream_step(void) {
             m2s.seq = BK_SPLIT_FLASH_SEQ_REPORT;
 
             bool     ok        = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
-            uint32_t own_crc   = bk_sent_crc ^ 0xFFFFFFFFu;
+            uint32_t own_crc   = bk_crc32_finalize(bk_sent_crc);
             uint32_t slave_crc = ok ? s2m.ack : 0;
             if (ok && slave_crc == own_crc) {
-                bk_marker(true, NULL, 0, slave_crc);
+                bk_transport_marker(true, NULL, slave_crc);
+                bk_phase = BK_STREAM_VERIFY;
             } else {
-                bk_marker(false, ok ? "crc" : "tx", bk_chunk_count, slave_crc);
+                bk_transport_marker(false, ok ? "crc" : "tx", slave_crc);
+                bk_phase = BK_STREAM_IDLE;
             }
+            break;
+        }
+
+        case BK_STREAM_VERIFY: {
+            m2s.seq = BK_SPLIT_FLASH_SEQ_VERIFY;
+
+            bool     ok       = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            uint32_t own_crc  = bk_crc32_finalize(bk_sent_crc);
+            uint32_t readback = ok ? s2m.ack : 0;
+            if (ok && readback == own_crc) {
+                bk_flash_marker(true, NULL, readback);
+            } else {
+                bk_flash_marker(false, ok ? "crc" : "tx", readback);
+            }
+            bk_phase = BK_STREAM_IDLE;
             break;
         }
 
         default:
             break;
     }
-}
-
-void keyboard_post_init_bk_split_flash(void) {
-    bk_split_flash_register_transaction();
 }
 
 void housekeeping_task_bk_split_flash(void) {

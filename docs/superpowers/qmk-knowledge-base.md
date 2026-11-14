@@ -77,6 +77,11 @@ plan/status belongs in the plan documents, not here.
   post-init; `housekeeping_task_<module>()` runs on **both halves** every main loop.
 - API version gate: `ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 2);`
   (current tree hooks list: `data/constants/module_hooks/`).
+  The versioned hook lists there run `0.1.0` → `1.1.3`; `keyboard_post_init_<module>` /
+  `housekeeping_task_<module>` exist from `1.0.0`, so a module using only those may assert `(1, 0, 0)`
+  (e.g. `modules/qmk/hello_world`); a higher assert is only needed for hooks added later (e.g. split data
+  sync support is `1.1.2`, `modules/qmk/split_data_sync`). The assert is a *minimum*: any value ≤ the tree's
+  provided version compiles.
 - Generated wrapper `community_modules.c` provides weak `*_modules()` wrappers that call each enabled
   module's hook; `keyboard.c` calls `keyboard_post_init_modules()` / `housekeeping_task_modules()`.
 
@@ -199,6 +204,11 @@ plan/status belongs in the plan documents, not here.
   to RAM before exiting XIP and re-enter XIP via that copy. `hardware_flash/flash.c` is in `PICOSDKSRC`
   (RP2040.mk), so module code can call them directly — no need to re-implement the boot2/XIP dance (the
   `wear_leveling_rp2040_flash.c` pattern is exactly what these primitives do).
+- **Headers are on the module include path:** `RP2040.mk` `PICOSDKINC` puts `hardware_flash/include`,
+  `hardware_sync/include`, and `rp2040/hardware_regs/include` on the include path, so module code can
+  `#include "hardware/flash.h"` (`flash_range_erase`/`_program`, `FLASH_PAGE_SIZE`=256, `FLASH_SECTOR_SIZE`=4096),
+  `hardware/sync.h` (`save_and_disable_interrupts`/`restore_interrupts`), and `hardware/regs/addressmap.h`
+  (`XIP_BASE`=0x10000000) directly.
 - **Requirements when calling them:** interrupts disabled (`save_and_disable_interrupts` /
   `restore_interrupts` are static inline in `hardware/sync.h`); the `data` buffer passed to
   `flash_range_program` must be in RAM; `flash_range_program` offset must be 256-byte aligned and `count` a
@@ -209,6 +219,20 @@ plan/status belongs in the plan documents, not here.
   be RAM (its own code is in the erased region), so such a routine must be `__no_inline_not_in_flash_func`
   (→ `.time_critical.*` → RAM `.data`) and must not call memcpy/print/etc. The linker may emit a flash
   `*_veneer` stub for cross-TU calls into it — harmless (runs with XIP up).
+- **Erase must run outside any transaction:** `flash_range_erase`/`_program` require interrupts disabled, and
+  with IRQs off the ChibiOS scheduler is stopped, so the slave's `SlaveThread` cannot service the link for the
+  duration of the op. A 256 B page program (~1–5 ms) fits inside the 20 ms transport read timeout from a
+  slave callback; a 4 KiB sector erase (tens of ms) does not. So an erase is best done *before* the master
+  initiates (e.g. at slave `keyboard_post_init`), and the master must not transact until it has completed.
+- **A whole-slot read-back does not fit one callback:** reading the whole ~90 KiB staging slot over XIP and
+  CRC-32ing it in a single slave callback exceeds the 20 ms timeout (observed on hardware: the end-of-stream
+  VERIFY transaction returned `FAIL reason=tx` while the stream itself was fine). Read the slot back a 256 B
+  page at a time as each page is programmed and fold it into an incremental CRC, so the verify callback is
+  O(1) and can never blow the timeout.
+- **Re-programming identical data is idempotent:** NOR program only clears bits (1→0) and never sets them, so
+  writing the same bytes again over an already-programmed page leaves it unchanged (no 0→1 transition is ever
+  needed). Streaming the *same* image repeatedly to an already-erased staging slot is therefore safe without
+  re-erasing; re-writing a *different* image without erasing would corrupt (result = old AND new).
 - **Vector-table hazard:** `crt0_v6m.S` sets VTOR to `_vectors` in **flash** (sector 0). Erasing sector 0
   while running = next IRQ fetches `0xFF` → hard fault. So sector 0 must only be erased inside an
   interrupts-off commit.
