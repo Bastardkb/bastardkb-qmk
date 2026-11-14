@@ -307,6 +307,20 @@ plan/status belongs in the plan documents, not here.
   Confirmed identical on the stock image. Corollary: hold L00 while plugging a half's own USB to enter
   BOOTSEL for flashing without double-tap. (The right half's bootmagic key is R50.)
 
+## Argos build-id sync (userspace module)
+
+- The userspace `argos` module (`modules/bastardkb/argos/argos.c`) runs a build-id sync
+  (`RPC_ID_BUILD_ID_SYNC`): the master sends its build id (`argos_generate_build_id()`, derived from
+  `__DATE__`/`__TIME__` compile constants — **not** EEPROM content) to the secondary, which replies same/diff.
+- When the two halves run **different builds** (e.g. after a clone between builds), the module drives a red
+  breathing RGB error state (`RGB_MATRIX_BREATHING` + `HSV_RED`, speed 255) on both halves and blocks
+  keypresses on the master (unless `ARGOS_DISABLE_BUILD_ID_GATE`). The sync only runs once per boot
+  (`has_synced_firmware_id` is static; retries stop at 10), so a mismatch that persists until a reboot is
+  expected — the red flashing after a *clone* is not a clone failure.
+- The mismatch indication (`argos_sides_have_different_firmware_id()` gate in
+  `rgb_matrix_indicators_advanced_argos`) is being moved into the `bk_split_flash` module (see the plan's
+  step 7); the build-id sync itself stays in argos.
+
 ## Misc
 
 - `.build/` has per-target `obj_*` dirs and the generated `src/` intermediates (community modules, `.inc` files).

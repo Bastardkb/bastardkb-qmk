@@ -8,9 +8,10 @@
 
 ## Objective (the MVP)
 
-On an **explicit trigger at boot on the master** (the USB half), the master copies its **own** firmware
-image `[XIP_BASE, __flash_binary_end)` to the secondary over the split link. The secondary writes it to
-flash, verifies it, commits it, and reboots into it.
+When a new firmware is written to the **master** (the USB half), the master clones its **own** firmware
+image `[XIP_BASE, __flash_binary_end)` to the secondary over the split link on its next boot. The
+secondary writes it to flash, verifies it, commits it, and reboots into it. (Original: explicit trigger at
+boot; superseded by the automatic EEPROM-fingerprint trigger, decided for work step 5.)
 
 Outside the trigger, the keyboard behaves exactly as stock: **no feature code runs and no boot-time
 behaviour changes.**
@@ -162,6 +163,22 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      known-good**. (The whole-image CRC is build-specific because `QMK_BUILDDATE` is embedded; the check is
      that master/slave/readback agree.)
 5. **Trigger.** Wire the trigger to start the whole flow.
+   - **STATUS: DONE (2026-11-14).** Hardware PASS on `bastardkb/dilemma/4x6_4_procyon` (`-km vendor`), two
+     runs, golden `bk_split_flash_step5.uf2`:
+     - Run 1 (both halves on the same step-5 build): `BKCLONE: step=5 trigger=1 crc=0x80B467E2 ok` →
+       `step=3 transport chunks=408 bytes=94096` → `step=3 flash … readback=0x80B467E2 ok` →
+       `step=4 commit bytes=94096 … action=skip ok`. The trigger fired on a fresh master (datablock mismatch),
+       the guard correctly skipped the identical image, and the one-shot stream never re-ran.
+     - Run 2 (crossing builds: secondary on step-5 build A, master on step-5 build B — same source, different
+       build timestamp ⇒ different CRC): `action=commit` — the secondary committed, erased its whole EEPROM
+       inside the commit, and rebooted into the master's build. Keyboard typed after reboot.
+   - **Post-commit red flashing (follow-up, not a clone bug):** both halves flashed red after the crossing
+     build commit. Cause: the userspace **Argos** module's build-id sync (`argos.c`), which compares the two
+     halves' build IDs (`__DATE__`/`__TIME__` compile constants) and drives a red breathing RGB error state
+     whenever they differ — expected in the crossing-build test by construction. It self-resolves on reboot
+     (the sync re-runs on each boot). The user then decided to move that mismatch indication out of argos
+     into bk_split_flash (see step 7) — this also removes a UX trap: a build-id red flash after a *clone*
+     would make the user think the clone failed.
    - **SUPERSEDED (user, 2026-11-14): automatic "new firmware on master" detection, not Bootmagic.** The
      earlier Bootmagic-key decision below is replaced: whenever a new firmware is written to the master, the
      master clones it to the secondary on its next boot, with no separate key/mechanism.
@@ -219,6 +236,13 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
    - **Assertion:** flash both halves, trigger the flow, and confirm the keyboard shows the in-progress
      indication for the duration, then the success indication at completion, then returns to normal.
      Print one marker (`BKCLONE: step=7 …`) alongside the visual state.
+   - **User decision (2026-11-14, from step 5): move the red "firmware id desync" flashing out of argos into
+     bk_split_flash.** The userspace argos module (`argos.c`) currently drives a red breathing RGB error
+     state whenever the two halves' build IDs differ (`__DATE__`/`__TIME__` compile constants, not EEPROM
+     content), gated by `rgb_matrix_indicators_advanced_argos` → `argos_sides_have_different_firmware_id()`.
+     That code moves into bk_split_flash (it owns the clone's semantics), and argos loses it. The build-id
+     sync itself (RPC_ID_BUILD_ID_SYNC, key blocking) stays in argos. This also removes the step-5 UX trap:
+     after a successful clone the argos red flash looked like a clone failure.
 
 ## Harness / test protocol
 
@@ -233,9 +257,9 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
   distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
   repo root / userspace root no longer exists. Goldens live in `$QMK_USERSPACE`
-  (`/home/qlebastard/qmk_userspace_bstiq/`). Current golden: `bk_split_flash_step4.uf2` (re-snapshotted there
-  on 2026-11-14 from the step-4 build, since the earlier copy was missing); step-5 candidate:
-  `bk_split_flash_step5.uf2`.
+  (`/home/qlebastard/qmk_userspace_bstiq/`). Current golden: `bk_split_flash_step5.uf2` (step-5 hardware PASS,
+  2026-11-14). Earlier golden: `bk_split_flash_step4.uf2` (re-snapshotted there on 2026-11-14 from the step-4
+  build, since the earlier copy was missing).
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)
@@ -245,8 +269,10 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   request phases succeeded; the response never came back even with a 200 ms read window; delaying the first
   probe to 6 s (after the secondary's post_init) did not help; the same *minimal* round-trip worked. Do not
   build the transfer on the RPC.
-- **Boot-time auto-handshake / fingerprint detection.** Probing on every boot risks the link and the boot
-  path; use an explicit trigger.
+- **Boot-time auto-handshake / fingerprint detection over the link.** Probing the secondary on every boot
+  risks the link and the boot path. The shipped trigger is different: the master compares its **local**
+  EEPROM-stored fingerprint with its own image CRC — no link probing, no boot-time behaviour change outside
+  the trigger — so it is safe. Keep the trigger local; do not reintroduce boot-time probing.
 - **Changing boot behaviour and the transport in the same step.** The previous failure bundled a payload
   change, a CRC, a policy, and boot-time behaviour — impossible to bisect.
 ct.
