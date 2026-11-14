@@ -98,7 +98,9 @@ plan/status belongs in the plan documents, not here.
 - `quantum/split_common/transport.c` (`transport_execute_transaction`, `transport.c:104-121`) is the one
   primitive: `transport_execute_transaction(id, m2s_buf, m2s_len, s2m_buf, s2m_len)`. It looks up
   `split_transaction_table[id]`, copies the master's m2s buffer into the shmem buffer at the entry's offset,
-  runs the wire transaction, then copies the s2m result back out.
+  runs the wire transaction, then copies the s2m result back out. Both copies are
+  `min(entry_size, caller_length)`, so passing `sizeof(struct)` (== the entry size) copies it whole; these
+  lengths themselves never travel on the wire.
 - `split_transaction_table[]` is `extern` and **non-const** (`transactions.h:38`); its entries hold
   `{m2s_size, m2s_offset, s2m_size, s2m_offset, slave_callback}`. A module can write its own entry at
   runtime (as `transaction_register_rpc` does, `transactions.c:1071-1079`).
@@ -133,6 +135,11 @@ plan/status belongs in the plan documents, not here.
   reliably and repeatedly (26+ consecutive). Register the table entry in `keyboard_post_init_<module>` (runs on
   both halves; the slave thread starts in `split_post_init`, just before it — a probe in that tiny window fails
   once and self-recovers via the thread's clear-on-error).
+- **Bulk streaming proven (hardware, 2026-11-14):** the same transaction streams the master's whole image
+  (398 chunks × 240 B m2s, offset-carrying header + per-chunk CRC-8) at one transaction per master
+  `housekeeping_task` call (~4.5 s for 91820 B, ~11 ms/chunk), with the slave accumulating an incremental
+  CRC-32 and returning it in the 4 B s2m at end of stream; master and slave values matched. The keyboard
+  stayed usable during the burst (one transaction per main-loop iteration).
 
 ## Build-environment facts (observed in this workspace)
 
@@ -206,7 +213,12 @@ plan/status belongs in the plan documents, not here.
   while running = next IRQ fetches `0xFF` → hard fault. So sector 0 must only be erased inside an
   interrupts-off commit.
 - **Linker symbols:** `__flash_binary_start` / `__flash_binary_end` / `__boot2_start__` from
-  `RP2040_FLASH_TIMECRIT.ld`. Image length = `&__flash_binary_end - XIP_BASE`.
+  `RP2040_FLASH_TIMECRIT.ld`. Image length = `&__flash_binary_end - XIP_BASE`. flash1's origin is
+  `0x10000000` = `XIP_BASE` (`addressmap.h:18`), so `__flash_binary_start` == `XIP_BASE`;
+  the step-1 `-km vendor` map showed `__flash_binary_start=0x10000000` and
+  `__flash_binary_end=0x10016414` (~89 KiB). No header declares these symbols, so a module declares them
+  itself: `extern const uint8_t __flash_binary_start[];` (likewise `…_end`). Reading `[start, end)` over XIP
+  while running is fine.
 - **Flash-size reality:** `PICO_FLASH_SIZE_BYTES` stays 2 MiB even on BKB 4 MiB chips
   (`EXTERNAL_FLASH_SIZE 4MiB` in board config.h does NOT feed pico-sdk; linker `flash1` defaults to 2048k
   since `FLASH_LEN` is undefined). Wear-leveling EEPROM base = `PICO_FLASH_SIZE_BYTES - 8192` = `0x1FE000`;
@@ -239,6 +251,14 @@ plan/status belongs in the plan documents, not here.
 ## Misc
 
 - `.build/` has per-target `obj_*` dirs and the generated `src/` intermediates (community modules, `.inc` files).
+- CRC: `quantum/crc.c` provides only a **weak, whole-buffer** `crc8()` (`crc.h`; poly 0x31, init 0xff, no
+  incremental variant); the tree has no CRC-32 helper, so a module wanting an incremental CRC-32 implements
+  its own. `crc.o` **is** compiled into the vendor build (present under `.build/obj_*/quantum/crc.o`), and
+  `-Werror` is on by default (`builddefs/common_rules.mk:81-83`; nothing in tree/keymaps/userspace sets
+  `ALLOW_WARNINGS=yes`), so a successful build already proves a warning-free compile.
+- `qmk compile` copies the produced UF2 over `<QMK_HOME>/<name>.uf2` **and**
+  `<QMK_USERSPACE>/<name>.uf2` ("Copying … to qmk_firmware/userspace folder"), silently overwriting any
+  golden kept at those two paths — keep goldens under a distinct filename.
 - Keep the CLI output clean: this repo builds with `qmk compile`; check `qmk env` for QMK_HOME/USERSPACE
   resolution (userspace = `/home/qlebastard/qmk_userspace_bstiq`).
 - `qmk_module.json` `features` (e.g. `"features": {"console": true}`) flow into the generated

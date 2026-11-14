@@ -83,6 +83,19 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
    slave acks the matching sequence number. The slave accumulates a **rolling CRC over the received bytes**;
    at end of stream the master compares it against its own whole-image CRC. No flash, no RAM buffer — this is
    the old "whole image" checkpoint without the throwaway buffer (bulk transport proven end to end).
+   - **STATUS: DONE (2026-11-14).** Hardware PASS on `bastardkb/dilemma/4x6_4_procyon` (`-km vendor`): two
+     consecutive `BKCLONE: step=2 chunks=398 bytes=91820 crc=0x48643FE0 slave=0x48643FE0 ok` lines — the
+     master's CRC-32 over the bytes it sent equals the slave's rolling CRC-32 over the bytes it received.
+     This UF2 (`bk_split_flash_step2.uf2`) is the **golden known-good**.
+   - Confirmed format (user decision, 2026-11-14): keep Step 1's 240 B m2s / 4 B s2m; `m2s =
+     {seq, offset, crc8, data[231]}`, `s2m = ack`. Control ops use reserved `seq` values: `seq=0` "begin"
+     carries the image length in `offset` and resets slave state; a final `seq=0xFFFFFFFF` "report" makes the
+     slave return its finalized CRC-32 in `ack`. Ack sentinels: begin `0xFFFFFFFF`, seq error `0`, CRC-8 error
+     `0xFFFFFFFE`; a good data chunk is acked with its own `seq`.
+   - Cadence (user decision, 2026-11-14): the master streams the whole image **once ~5 s after boot and then
+     every 20 s** (each run prints one marker), so the ~3 s split-boot skew is cleared. No trigger, no flash,
+     no RAM image buffer; the slave keeps only a rolling CRC-32 plus a few words of state. One transaction per
+     `housekeeping_task` call, so the keyboard stays usable.
 3. **Write to staging flash.** Slave writes each chunk into the staging slot (erase staging first) and the
    result is verified by read-back / CRC. Transport vs. flash integrity are reported by **distinct markers**,
    so a failure here is unambiguously a flash bug.
@@ -102,6 +115,10 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
 - The human flashes **both** halves, connects **only the primary's** USB, power-cycles, captures the full
   console from power-on for the needed window, and pastes it back.
 - Keep a **golden UF2** (last known-good). After every flash, confirm the keyboard still boots and types.
+  `qmk compile` copies its output over `<QMK_HOME>/<name>.uf2` **and** `<QMK_USERSPACE>/<name>.uf2`, so an
+  earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
+  distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
+  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step2.uf2`.
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)

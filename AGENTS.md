@@ -28,8 +28,15 @@ together. Then read, in order:
   this workflow; it is not evidence and must not be used for orientation or verification.
 - **Build/compile once per artefact.** A successful build proves a clean compile; do not recompile to
   re-derive or re-check it, warnings included.
+- **Snapshot the golden before rebuilding the same target.** The toolchain overwrites the artefact copies it
+  writes (`qmk compile` copies `<name>.uf2` over `$QMK_HOME` **and** `$QMK_USERSPACE`), so copy the current
+  known-good to a distinct name (e.g. `bk_split_flash_step<N>.uf2`) *first*. Never treat
+  `<QMK_HOME>/<name>.uf2` as the golden.
 - **Run each check once.** Do not re-run a command or re-verify evidence a build, a `STATIC_ASSERT`, or an
   earlier run already proved.
+- **Run a command bare; don't pipe it.** Never pipe build/check output through `head`/`tail`/`grep` — the
+  truncation silently discards warnings and other evidence. Let the shell tool capture the full output (it
+  spills to a file you can search).
 - **Before any command, ask whether it is required for this step's single deliverable.** If not, skip it.
   Prefer reading files over running tools.
 - **Search inside WSL, not over the share.** The tree is a WSL share, so Windows-side search tools walk the
