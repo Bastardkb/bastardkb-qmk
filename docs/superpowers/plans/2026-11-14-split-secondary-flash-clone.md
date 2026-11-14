@@ -115,12 +115,39 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      single-verdict steps.
 4. **Commit + reboot.** Verify, then commit (erase active, copy, boot2 last), then reboot the secondary
    into the new image.
+   - **Verify must include bootability, not just CRC-32.** Step 3 proved the staged bytes equal the sent
+     bytes; committing them erases the active region and sector 0, so a CRC-valid but **unbootable** image
+     would brick the secondary. Before erasing anything, also check the **RP2040 boot2 checksum**
+     (`bitrev32(crc_reg(bitrev8(boot2[0:252])))`, see the KB) and **vector-table plausibility** (initial `sp`
+     at image+0x100, reset vector at image+0x104). Optional strengthening: fold the boot2 checksum into
+     step 3's `flash` marker so "flash ok" already means byte-exact **and** bootable.
+   - **Commit mechanics:** the whole erase+copy is one interrupts-off, **RAM-resident** routine
+     (`.time_critical.*`, no calls into flash — no `memcpy`/print) because VTOR points at flash sector 0;
+     erase **sector 0 only inside the commit**; write **boot2 last**. Never erase the wear-leveling EEPROM
+     (`0x1FE000`) or the staging slot.
+   - **Re-clone guard (required for "keyboard stays usable"):** skip the commit when the staged image already
+     matches the slave's active image — otherwise the current 20 s cadence would commit+reboot every 20 s and
+     the secondary would never be usable. Needs the slave to CRC its **active** region for the comparison.
+   - **Reboot + recovery:** clean system reset after the commit; the master must tolerate the secondary
+     dropping off the link and reappearing (and must not immediately re-trigger). A mid-commit power loss
+     leaves no valid vectors — the handoff must document the BOOTSEL recovery (hold L00 / double-tap).
+   - **Assertion:** both halves boot the new image, the link recovers, the keyboard types, and the secondary
+     does **not** re-commit on the next cadence.
 5. **Trigger.** Wire the trigger to start the whole flow.
    - **OPEN (user request 2026-11-14):** the trigger should be **automatic** — the master copies to the
      secondary right after the master itself is updated, with **no second bootmagic**. Mechanism (build-id
      fingerprint vs. copy-on-every-boot) still to be decided; this supersedes the "explicit trigger" wording
      once decided. Either way a deferred wait is needed for the ~3 s master→secondary boot skew.
 6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
+   - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
+     image length and rejects a longer `BEGIN`. That only holds while both halves run the same UF2 — but the
+     trigger's whole point is "master pushes its image **after the master is updated**", so the master's image
+     can be **newer/larger** than the secondary's, giving `LEN_ERR` and no clone. Size the staging region from
+     the **master's** declared length instead: either erase a fixed `BK_SPLIT_FLASH_STAGING_MAX` at boot
+     (~256 KiB ≈ 2.9 s, may force a larger first-run delay), or defer the erase — a `prepare(length)` op whose
+     callback only records the length (O(1)) and whose erase runs in the slave `housekeeping_task`, with the
+     master polling a ready op (the async pattern `AGENTS.md` mandates). Must be resolved before the automatic
+     trigger (step 5) is validated with a master image that differs from the secondary's.
 
 7. **Visual indicator (LED).** Give the user an on-keyboard indication of a running master→secondary clone,
    using the keyboard's addressable LEDs (RGB matrix / underglow) — this is the "minimal indicator" carved
