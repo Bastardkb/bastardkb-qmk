@@ -239,7 +239,7 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      outside it no re-flash happens. Open detail: L00 already enters BOOTSEL on this board (KB), so choose a
      non-conflicting trigger key/combo or run the check after Bootmagic handling. A deferred wait is still
      needed for the ~3 s master→secondary boot skew.
-6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
+6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication through console.
    - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
      image length and rejects a longer `BEGIN`. That only holds while both halves run the same UF2 — but the
      trigger's whole point is "master pushes its image **after the master is updated**", so the master's image
