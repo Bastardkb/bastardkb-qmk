@@ -17,7 +17,8 @@ behaviour changes.**
 
 ## Non-goals (explicitly out of MVP scope)
 
-- No automatic fingerprint / handshake / version negotiation — the trigger is explicit.
+- No automatic fingerprint / handshake / version negotiation — the trigger is explicit. *(Under revision:
+  see work step 5 — user wants an automatic trigger.)*
 - No transferring a foreign image (only the master's own image).
 - No progress UI beyond a minimal indicator.
 - No EEPROM / handedness semantics changes.
@@ -59,8 +60,9 @@ behaviour changes.**
 
 ### The trigger
 
-- Explicit (a key held at boot, or Bootmagic) — **never** a boot-time auto-detect. Mind the dilemma
-  Bootmagic L00 caveat in the knowledge base.
+- **Under revision (see work step 5).** Was: explicit (a key held at boot, or Bootmagic) — **never** a
+  boot-time auto-detect. The user now wants it **automatic** after the master is updated, with **no second
+  bootmagic**; mechanism TBD. Mind the dilemma Bootmagic L00 caveat in the knowledge base.
 
 ## Ordered work steps (riskiest / most important first)
 
@@ -77,20 +79,21 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      `split_transaction_table` entry; reuses the RPC shmem buffers (`RPC_M2S_BUFFER_SIZE 240`); driven from
      the master's `housekeeping_task_bk_split_flash` every 500 ms via one `transport_execute_transaction`
      (no RPC, no flash, no trigger).
-2. **Chunk streaming.** Master sends many chunks in sequence, advancing only when the slave acks the
-   matching sequence number; the slave acks each. No flash yet.
-3. **Whole-image transfer into RAM.** Master streams the entire image; the slave holds it in a RAM buffer;
-   the master reads back a checksum over the whole thing. Proves bulk integrity end to end.
-4. **Write to staging flash.** Slave writes each chunk into the staging slot (erase staging first) and the
-   result is verified by read-back / CRC.
-5. **Commit + reboot.** Verify, then commit (erase active, copy, boot2 last), then reboot the secondary
+2. **Chunk streaming + transport integrity.** Master sends many chunks in sequence, advancing only when the
+   slave acks the matching sequence number. The slave accumulates a **rolling CRC over the received bytes**;
+   at end of stream the master compares it against its own whole-image CRC. No flash, no RAM buffer — this is
+   the old "whole image" checkpoint without the throwaway buffer (bulk transport proven end to end).
+3. **Write to staging flash.** Slave writes each chunk into the staging slot (erase staging first) and the
+   result is verified by read-back / CRC. Transport vs. flash integrity are reported by **distinct markers**,
+   so a failure here is unambiguously a flash bug.
+4. **Commit + reboot.** Verify, then commit (erase active, copy, boot2 last), then reboot the secondary
    into the new image.
-6. **Trigger.** Wire the trigger to start the whole flow.
+5. **Trigger.** Wire the trigger to start the whole flow.
    - **OPEN (user request 2026-11-14):** the trigger should be **automatic** — the master copies to the
      secondary right after the master itself is updated, with **no second bootmagic**. Mechanism (build-id
      fingerprint vs. copy-on-every-boot) still to be decided; this supersedes the "explicit trigger" wording
      once decided. Either way a deferred wait is needed for the ~3 s master→secondary boot skew.
-7. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
+6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
 
 ## Harness / test protocol
 
