@@ -510,8 +510,9 @@ static void __no_inline_not_in_flash_func(bk_split_flash_commit)(void) {
     // Record provenance only after the new active image is fully programmed.
     // The marker is outside the image slot and survives the EEPROM wipe above.
     bk_flash_erase(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET, FLASH_SECTOR_SIZE);
+    volatile uint8_t *marker_page = bk_page;
     for (uint32_t i = 0; i < FLASH_PAGE_SIZE; i++) {
-        bk_page[i] = 0xFFu;
+        marker_page[i] = 0xFFu;
     }
     bk_page[0]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC);
     bk_page[1]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 8);
@@ -577,6 +578,8 @@ static bool     bk_done;      // clone attempt finished (success or failure)
 static uint32_t bk_image_crc; // fingerprint of this image
 
 #ifdef RGB_MATRIX_ENABLE
+static const uint32_t BK_INDICATOR_SUCCESS_DURATION_MS = 4500;
+
 typedef enum {
     BK_INDICATOR_IDLE = 0,
     BK_INDICATOR_PROGRESS,
@@ -629,7 +632,7 @@ static void bk_indicator_restore(void) {
 }
 
 static void bk_indicator_task(void) {
-    if (bk_indicator_state == BK_INDICATOR_SUCCESS && timer_elapsed32(bk_indicator_started) >= 3000) {
+    if (bk_indicator_state == BK_INDICATOR_SUCCESS && timer_elapsed32(bk_indicator_started) >= BK_INDICATOR_SUCCESS_DURATION_MS) {
         bk_indicator_restore();
     }
 }
@@ -641,7 +644,7 @@ bool rgb_matrix_indicators_advanced_bk_split_flash(uint8_t led_min, uint8_t led_
 
     if (bk_indicator_state == BK_INDICATOR_SUCCESS) {
         uint32_t elapsed = timer_elapsed32(bk_indicator_started);
-        bool     on      = elapsed < 3000 && ((elapsed / 500) % 2) == 0;
+        bool     on      = elapsed < BK_INDICATOR_SUCCESS_DURATION_MS && ((elapsed / 500) % 2) == 0;
         for (uint8_t i = led_min; i < led_max; i++) {
             rgb_matrix_set_color(i, 0, on ? 120 : 0, 0);
         }

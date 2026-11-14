@@ -9,6 +9,12 @@
 ## Current status (read this + your step first; pull the rest only on demand)
 
 - **Done: steps 1–8. Step 8 was hardware-validated with the optimized secondary/master pair.**
+- **STATIC PASS: post-step-8 hardening (2026-11-14).** The commit path's marker-page fill was
+  compiled into a call to flash-resident `memset`. Replace it with a RAM-safe volatile fill, then
+  build a normal secondary image and a deliberately enlarged master image and verify both linked
+  images contain no flash-library call from `bk_split_flash_commit`, while their image boundaries
+  and hashes differ. The saved test pair passed this analysis; hardware crossing-image validation
+  remains pending.
 - **AMENDED (user, 2026-11-14): the trigger's fixed 5 s first-run delay is replaced by an adaptive
   readiness probe.** The master now prints the `step=5 trigger=1|0` marker immediately on its first
   housekeeping call, and a triggered clone streams as soon as the secondary is able to receive it: the
@@ -138,6 +144,19 @@ behaviour changes.**
 ## Ordered work steps (riskiest / most important first)
 
 Each step = **one build, one hardware assertion**, keyboard stays usable. Track status here.
+
+9. **RAM-safe marker-page fill.** The commit routine must not call `memset` or any other
+   flash-resident helper after erasing and rewriting the active image. Use a volatile RAM fill for
+   the marker page, then validate a normal secondary image against a deliberately enlarged master
+   image. Static validation must show distinct final UF2 hashes, a retained master-only payload,
+   and no `memset`/`memcpy` call in the linked `bk_split_flash_commit` routine. Hardware validation
+   remains a separate gate after the artefacts are handed off.
+   - **STATIC STATUS: PASS (2026-11-14).** The fix uses a volatile RAM destination for the marker
+     page. Normal secondary image boundary: `0x100173B8`; enlarged master image boundary:
+     `0x100183D8`; master-only retained payload symbol size: `0x1000`. Final UF2 hashes differ:
+     secondary `5fc0c439e531b9ecfaf7bee3c5f8b92f3fd3758a7fcaf85a7325ca9b481adfce`, master
+     `6972013a9b548e9ff041d815de746b45a54fae7df3d52a57c0544dc4ff29d8e0`. Both linked commit
+     routines compile the marker fill as an inline RAM loop and contain no `memset`/`memcpy` call.
 
 1. **Transport round-trip at the final chunk size.** Prove a single custom transaction carries a full-size
    chunk (m2s) and returns an ack (s2m) between the two halves, repeatedly. *This is the step the previous
