@@ -8,7 +8,7 @@
 
 ## Current status (read this + your step first; pull the rest only on demand)
 
-- **Done: steps 1–6. Steps 7 (visual indicator) and 8 (speed optimization) are scoped, not started.**
+- **Done: steps 1–7. Step 7 was hardware-validated; a subsequent brightness-only source tweak is not yet rebuilt. Step 8 (speed optimization) remains scoped, not started.**
 - **AMENDED (user, 2026-11-14): the trigger's fixed 5 s first-run delay is replaced by an adaptive
   readiness probe.** The master now prints the `step=5 trigger=1|0` marker immediately on its first
   housekeeping call, and a triggered clone streams as soon as the secondary is able to receive it: the
@@ -38,8 +38,18 @@
   secondary, and the keyboard remained usable. The normal 15-second Image A is the new baseline golden:
   `bk_split_flash_probeA.uf2`.
 - Last PASS: adaptive-probe amendment, 2026-11-14 — golden `bk_split_flash_probeA.uf2` (in `$QMK_USERSPACE`).
-- Next blocker: step 7's remaining LED states (idle / in-progress / success) still need user confirmation
-  before implementing (the failure / mismatched-versions state is now specified).
+- **PASS (user, 2026-11-14): Step 7 visual indicator validated on hardware.** The distinct secondary/master
+  images completed the clone with blue breathing during the attempt, three green on/off pulses after success,
+  restored stock RGB behavior afterward, and red breathing on the detached-secondary timeout without red on
+  successful `commit`/`skip`. The validated artefacts were `bk_split_flash_step7_secondary.uf2` and
+  `bk_split_flash_step7_master.uf2`; both hashes differed and the master retained the deliberate 4 KiB payload.
+  After that gate, the indicator brightness was changed from 150 to 120 in source only at the user's request;
+  the pair has not been rebuilt yet.
+- **Retrospective:** Step 6's deferred staging and adaptive readiness probe preserved transport reliability and
+  keyboard usability, and the Step 7 pair correctly exercised the differing-image path. The handoff initially
+  went badly because the reproducible build produced identical images when rebuilt without a source distinction;
+  the root cause was treating separate invocations as different firmware. The retained-payload method and the
+  mandatory two-image/hash/link-symbol rules are now recorded in `AGENTS.md` to prevent recurrence.
 - Harness ground rules: one or more explicitly named UF2 artifacts may be required for crossing-build validation
   (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`),
   flash **both** halves, connect only the primary's USB, full console from power-on, exactly one greppable
@@ -280,19 +290,19 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      `keyboards/bastardkb/dilemma/4x6_4_procyon/keyboard.json`. Use the `rgb_matrix` indicator API rather
      than poking the driver buffers directly.
    - **States:** idle = unchanged stock animations (the Objective still holds: no behaviour outside the
-     trigger); in progress = a distinct animated colour for the stream duration (~5–7 s — **still to be
-     confirmed**); success = brief confirmation (**still to be confirmed**); **failure / mismatched
+      trigger); in progress = a distinct animated colour for the stream duration (~5–7 s — **confirmed**);
+      success = brief confirmation (**confirmed**); **failure / mismatched
      versions (user spec, 2026-11-14)** = after a **triggered** clone attempt, when the two halves still
      run different firmware versions — the automatic flash failed (transport/flash/boot/commit fail, or
      the 15 s probe give-up: secondary never online) — the master shows **red breathing**: RGB matrix mode
-     `RGB_MATRIX_BREATHING`, speed **255**, colour **`HSV_RED`**, brightness **150**, held until the
+      `RGB_MATRIX_BREATHING`, speed **255**, colour **`HSV_RED`**, brightness **120**, held until the
      mismatch is gone (a later successful clone, or both halves re-flashed). A successfull clone / re-flash will flash green lights three times in a on(.5 seconds)/off(.5 seconds) pattern.
    - **Assertion:** flash both halves, trigger the flow, and confirm the keyboard shows the in-progress
       indication for the duration, then the success indication at completion, then returns to normal.
       Print one marker (`BKCLONE: step=7 …`) alongside the visual state. **Failure assertion:** flash a new
       build onto **only the primary** (secondary off/detached so the probe gives up at 15 s), and confirm
       the master then shows the red breathing state (mode `RGB_MATRIX_BREATHING`, speed 255, `HSV_RED`,
-      brightness 150) and keeps it until a successful clone or re-flash — and confirm a successful
+       brightness 120) and keeps it until a successful clone or re-flash — and confirm a successful
       `action=commit`/`skip` run shows **no** red. A successfull clone / re-flash will flash green lights three times in a on(.5 seconds)/off(.5 seconds) pattern.
    - **Arming rule — red only when a clone attempt left the halves mismatched (user, 2026-11-14).** The
      moved indicator is gated by the **clone outcome**, not by any build-id difference. A **triggered**

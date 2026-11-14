@@ -8,6 +8,9 @@
 #include "transactions.h"
 #include "crc.h"
 #include "community_modules.h"
+#ifdef RGB_MATRIX_ENABLE
+#    include "rgb_matrix.h"
+#endif
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -27,6 +30,7 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 2);
 // 0x10000000) and `__flash_binary_end` the end of the load region.
 extern const uint8_t __flash_binary_start[];
 extern const uint8_t __flash_binary_end[];
+
 
 STATIC_ASSERT(sizeof(bk_split_flash_m2s_t) == BK_SPLIT_FLASH_M2S_SIZE, "m2s chunk must be full-size");
 STATIC_ASSERT(sizeof(bk_split_flash_s2m_t) == BK_SPLIT_FLASH_S2M_SIZE, "s2m ack size mismatch");
@@ -498,6 +502,87 @@ static bool     bk_triggered; // new firmware detected at boot
 static bool     bk_done;      // clone attempt finished (success or failure)
 static uint32_t bk_image_crc; // fingerprint of this image
 
+#ifdef RGB_MATRIX_ENABLE
+typedef enum {
+    BK_INDICATOR_IDLE = 0,
+    BK_INDICATOR_PROGRESS,
+    BK_INDICATOR_SUCCESS,
+    BK_INDICATOR_FAILURE,
+} bk_indicator_state_t;
+
+static bk_indicator_state_t bk_indicator_state;
+static uint32_t             bk_indicator_started;
+static uint8_t              bk_saved_mode;
+static uint8_t              bk_saved_speed;
+static hsv_t                bk_saved_hsv;
+static bool                 bk_indicator_saved;
+
+static void bk_indicator_begin(bk_indicator_state_t state) {
+    if (!bk_indicator_saved) {
+        bk_saved_mode      = rgb_matrix_get_mode();
+        bk_saved_speed     = rgb_matrix_get_speed();
+        bk_saved_hsv       = rgb_matrix_get_hsv();
+        bk_indicator_saved = true;
+    }
+
+    bk_indicator_state   = state;
+    bk_indicator_started = timer_read32();
+
+    if (state == BK_INDICATOR_PROGRESS) {
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_BREATHING);
+        rgb_matrix_set_speed_noeeprom(UINT8_MAX);
+        rgb_matrix_sethsv_noeeprom(170, 255, 120);
+    } else if (state == BK_INDICATOR_FAILURE) {
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_BREATHING);
+        rgb_matrix_set_speed_noeeprom(UINT8_MAX);
+        rgb_matrix_sethsv_noeeprom(0, 255, 120);
+    } else if (state == BK_INDICATOR_SUCCESS) {
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_SOLID_COLOR);
+        rgb_matrix_sethsv_noeeprom(85, 255, 120);
+    }
+}
+
+static void bk_indicator_restore(void) {
+    if (!bk_indicator_saved) {
+        return;
+    }
+
+    rgb_matrix_mode_noeeprom(bk_saved_mode);
+    rgb_matrix_set_speed_noeeprom(bk_saved_speed);
+    rgb_matrix_sethsv_noeeprom(bk_saved_hsv.h, bk_saved_hsv.s, bk_saved_hsv.v);
+    bk_indicator_saved = false;
+    bk_indicator_state = BK_INDICATOR_IDLE;
+}
+
+static void bk_indicator_task(void) {
+    if (bk_indicator_state == BK_INDICATOR_SUCCESS && timer_elapsed32(bk_indicator_started) >= 3000) {
+        bk_indicator_restore();
+    }
+}
+
+bool rgb_matrix_indicators_advanced_bk_split_flash(uint8_t led_min, uint8_t led_max) {
+    if (!is_keyboard_master() || bk_indicator_state == BK_INDICATOR_IDLE) {
+        return true;
+    }
+
+    if (bk_indicator_state == BK_INDICATOR_SUCCESS) {
+        uint32_t elapsed = timer_elapsed32(bk_indicator_started);
+        bool     on      = elapsed < 3000 && ((elapsed / 500) % 2) == 0;
+        for (uint8_t i = led_min; i < led_max; i++) {
+            rgb_matrix_set_color(i, 0, on ? 120 : 0, 0);
+        }
+    }
+
+    return true;
+}
+#else
+static void bk_indicator_begin(int state) {
+    (void)state;
+}
+
+static void bk_indicator_task(void) {}
+#endif
+
 // Whole-image CRC-32, used as the firmware fingerprint. QMK embeds the build
 // date/time in the image, so this changes on every rebuild and reliably
 // distinguishes a newly-flashed firmware from the one already recorded.
@@ -533,9 +618,14 @@ static void bk_trigger_marker(bool triggered) {
 }
 
 // Terminal state of the one-shot stream: stop and never re-run.
-static void bk_stream_finish(void) {
+static void bk_stream_finish(bool success) {
     bk_phase = BK_STREAM_IDLE;
     bk_done  = true;
+#ifdef RGB_MATRIX_ENABLE
+    bk_indicator_begin(success ? BK_INDICATOR_SUCCESS : BK_INDICATOR_FAILURE);
+#else
+    (void)success;
+#endif
 }
 
 // Three distinct markers per run. `transport` covers the link (the slave's
@@ -585,8 +675,11 @@ static void bk_stream_start(void) {
 
     if (bk_image_len == 0) {
         bk_flash_marker(false, "empty", 0);
-        bk_stream_finish();
+        bk_stream_finish(false);
     } else {
+#ifdef RGB_MATRIX_ENABLE
+        bk_indicator_begin(BK_INDICATOR_PROGRESS);
+#endif
         bk_phase = BK_STREAM_PREPARE;
         bk_probe_start_ms = timer_read32();
         bk_probe_at_ms    = bk_probe_start_ms;
@@ -609,16 +702,16 @@ static void bk_stream_step(void) {
             } else if (!ok) {
                 if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
                     bk_transport_marker(false, "prepare-tx", 0);
-                    bk_stream_finish();
+                    bk_stream_finish(false);
                 } else {
                     bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
                 }
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
                 bk_flash_marker(false, "len", 0);
-                bk_stream_finish();
+                bk_stream_finish(false);
             } else {
                 bk_transport_marker(false, "prepare-ack", s2m.ack);
-                bk_stream_finish();
+                bk_stream_finish(false);
             }
             break;
         }
@@ -634,13 +727,13 @@ static void bk_stream_step(void) {
             } else if (!ok || s2m.ack == BK_SPLIT_FLASH_ACK_BUSY) {
                 if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
                     bk_transport_marker(false, !ok ? "ready-tx" : "ready-timeout", s2m.ack);
-                    bk_stream_finish();
+                    bk_stream_finish(false);
                 } else {
                     bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
                 }
             } else {
                 bk_transport_marker(false, "ready-ack", s2m.ack);
-                bk_stream_finish();
+                bk_stream_finish(false);
             }
             break;
         }
@@ -659,16 +752,16 @@ static void bk_stream_step(void) {
                 // up after PROBE_TIMEOUT_MS (e.g. a lone master with no peer).
                 if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
                     bk_transport_marker(false, "begin-tx", 0);
-                    bk_stream_finish();
+                    bk_stream_finish(false);
                 } else {
                     bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
                 }
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
                 bk_flash_marker(false, "len", 0);
-                bk_stream_finish();
+                bk_stream_finish(false);
             } else {
                 bk_transport_marker(false, "begin-ack", s2m.ack);
-                bk_stream_finish();
+                bk_stream_finish(false);
             }
             break;
         }
@@ -699,7 +792,7 @@ static void bk_stream_step(void) {
 
             if (reason != NULL) {
                 bk_transport_marker(false, reason, s2m.ack);
-                bk_stream_finish();
+                bk_stream_finish(false);
                 break;
             }
 
@@ -721,7 +814,7 @@ static void bk_stream_step(void) {
                 bk_phase = BK_STREAM_VERIFY;
             } else {
                 bk_transport_marker(false, ok ? "crc" : "tx", slave_crc);
-                bk_stream_finish();
+                bk_stream_finish(false);
             }
             break;
         }
@@ -737,7 +830,7 @@ static void bk_stream_step(void) {
                 bk_phase = BK_STREAM_COMMIT;
             } else {
                 bk_flash_marker(false, ok ? "crc" : "tx", readback);
-                bk_stream_finish();
+                bk_stream_finish(false);
             }
             break;
         }
@@ -746,14 +839,17 @@ static void bk_stream_step(void) {
             m2s.seq = BK_SPLIT_FLASH_SEQ_COMMIT;
 
             bool ok = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            bool success = false;
             if (!ok) {
                 bk_commit_marker(false, NULL, "tx");
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_COMMIT) {
                 bk_trigger_persist();
                 bk_commit_marker(true, "commit", NULL);
+                success = true;
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_MATCH) {
                 bk_trigger_persist();
                 bk_commit_marker(true, "skip", NULL);
+                success = true;
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_BOOT_ERR) {
                 bk_commit_marker(false, NULL, "boot");
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_FLASH_ERR) {
@@ -762,7 +858,7 @@ static void bk_stream_step(void) {
                 bk_commit_marker(false, NULL, "ack");
             }
 
-            bk_stream_finish();
+            bk_stream_finish(success);
             break;
         }
 
@@ -772,6 +868,8 @@ static void bk_stream_step(void) {
 }
 
 void housekeeping_task_bk_split_flash(void) {
+    bk_indicator_task();
+
     if (!is_keyboard_master()) {
         bk_split_flash_prepare_staging();
 

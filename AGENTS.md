@@ -145,6 +145,23 @@ this step's plan wording** (not just the diff), with maintenance eyes.
   next time. Do not edit `AGENTS.md` on your own — present the proposed wording and apply it only after the
   user approves.
 
+## Split-clone crossing-image artefacts
+
+- Every split-secondary flash-clone test requires two firmware artefacts: a normal Step
+  image for the secondary and a deliberately distinct Step image for the master. Never
+  hand off a single image or two copies with the same hash.
+- Build and name them explicitly as `<feature>_step<N>_secondary.uf2` and
+  `<feature>_step<N>_master.uf2`. Flash the secondary image to the secondary before
+  testing the master clone path.
+- If reproducible builds produce identical images, do not rely on timestamps or repeated
+  builds. Use the established temporary master-only retained-payload variant: add a
+  build-only 4 KiB `used`/`volatile` payload, reference its first byte so the linker
+  retains it, build the master image, and remove the temporary define/payload from the
+  source afterward.
+- Verify both final UF2 SHA-256 hashes differ and verify the deliberate master image
+  enlargement at link time with `arm-none-eabi-nm -S`, confirming the retained payload
+  symbol has size `0x1000`, before hardware handoff.
+
 ## Process artefacts in this folder
 
 - `docs/superpowers/plans/` — plan documents (the working contract).
