@@ -8,7 +8,8 @@
 
 ## Current status (read this + your step first; pull the rest only on demand)
 
-- **Done: steps 1–5. In progress: step 6 (Harden). Step 7 (visual indicator) is scoped, not started.**
+- **Done: steps 1–5. In progress: step 6 (Harden). Steps 7 (visual indicator) and 8 (speed optimization)
+  are scoped, not started.**
 - **AMENDED (user, 2026-11-14): the trigger's fixed 5 s first-run delay is replaced by an adaptive
   readiness probe.** The master now prints the `step=5 trigger=1|0` marker immediately on its first
   housekeeping call, and a triggered clone streams as soon as the secondary is able to receive it: the
@@ -22,6 +23,11 @@
   failed, or never reached the secondary), the master flashes **red** — RGB matrix mode `RGB_MATRIX_BREATHING`,
   speed 255, `HSV_RED`, brightness 150 — held until the mismatch is resolved. See step 7 for the exact
   arming rule (never on a successful commit/skip).
+- **DECIDED (user, 2026-11-14): step 6 uses deferred staging preparation.** The master will declare the
+  image length with a `prepare(length)` operation; the secondary callback records that length in O(1), its
+  housekeeping task erases exactly the required rounded length, and the master polls a ready operation
+  before sending `BEGIN`/data. This avoids erasing the full 256 KiB slot on every secondary boot while
+  supporting a master image larger than the currently installed secondary image.
 - **PASS (user, 2026-11-14): adaptive probe validated on hardware.** Image A produced the immediate
   `trigger=1` → transport → flash → `action=skip` path; Image B (a distinct 1 ms timeout variant used only
   to force a different fingerprint) cloned onto the Image-A secondary with `action=commit`, rebooted the
@@ -54,8 +60,9 @@ behaviour changes.**
 - No transferring a foreign image (only the master's own image).
 - No progress UI beyond a minimal indicator (the LED indicator defined in work step 7).
 - No EEPROM / handedness semantics changes.
-- No further baud tuning (the `-km vendor` userspace config already sets `SERIAL_USART_SPEED 625000`; the
-  link is wire-bound at ~62.5 KB/s).
+- No speed tuning in MVP steps 1–7 (the `-km vendor` userspace config currently sets
+  `SERIAL_USART_SPEED 625000`; the link is wire-bound at ~62.5 KB/s). Performance work is isolated in
+  step 8 and must preserve the transaction timeout and keyboard usability constraints.
 
 ## Architecture — how it works
 
@@ -248,12 +255,11 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
    - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
      image length and rejects a longer `BEGIN`. That only holds while both halves run the same UF2 — but the
      trigger's whole point is "master pushes its image **after the master is updated**", so the master's image
-     can be **newer/larger** than the secondary's, giving `LEN_ERR` and no clone. Size the staging region from
-     the **master's** declared length instead: either erase a fixed `BK_SPLIT_FLASH_STAGING_MAX` at boot
-     (~256 KiB ≈ 2.9 s; the adaptive probe waits for the erase with no knob to change), or defer the erase —
-     a `prepare(length)` op whose
-     callback only records the length (O(1)) and whose erase runs in the slave `housekeeping_task`, with the
-     master polling a ready op (the async pattern `AGENTS.md` mandates). Must be resolved before the automatic
+     can be **newer/larger** than the secondary's, giving `LEN_ERR` and no clone. **Decision:** size the
+     staging region from the **master's** declared length with a `prepare(length)` op whose callback only
+     records the length (O(1)); erase the rounded length in the slave `housekeeping_task`, and have the master
+     poll a ready op before `BEGIN`/data (the async pattern `AGENTS.md` mandates). This avoids the fixed
+     `BK_SPLIT_FLASH_STAGING_MAX` boot erase (~256 KiB ≈ 2.9 s) and must be resolved before the automatic
      trigger (step 5) is validated with a master image that differs from the secondary's.
 
 7. **Visual indicator (LED).** Give the user an on-keyboard indication of a running master→secondary clone,
@@ -297,6 +303,23 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      mismatch while the secondary reboots after a commit cannot re-create the step-5 UX trap. Driven from
      the master's `housekeeping_task_bk_split_flash` via the `rgb_matrix` indicator API, like the other
      states, with the exact parameters from the States bullet.
+
+8. **Speed optimization.** Measure and reduce the end-to-end clone duration and time-to-first-transfer after
+   the secondary becomes available, without changing the verified clone safety model or making the keyboard
+   unusable.
+   - **Scope:** optimize only after step 6 reliability and step 7 indication are validated; keep the
+     adaptive readiness probe's immediate-start behaviour as the startup baseline.
+   - **Candidates:** reduce avoidable per-transaction overhead, improve safe chunk/housekeeping cadence,
+     minimize staging/page-program overhead where measurements justify it, and evaluate a higher serial baud
+     rate only if both halves remain reliable at that setting.
+   - **Constraints:** every slave callback remains O(1) and comfortably inside `SERIAL_USART_TIMEOUT`; no
+     long erase/read-back work moves into the transaction callback; preserve packet/read-back/bootability
+     checks, link recovery, and normal keyboard responsiveness.
+   - **Measurement:** report image size, chunk count, time from power-on to first accepted `BEGIN`, total
+     transfer time, total clone time, and keyboard responsiveness. Compare against the validated step-6/7
+     baseline and keep one firmware artefact per optimization step.
+   - **Assertion:** the optimized build is faster by a measured amount, still passes the complete clone and
+     recovery flow, and does not regress the readiness-probe or safety verdicts.
 
 ## Harness / test protocol
 
