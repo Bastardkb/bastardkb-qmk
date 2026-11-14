@@ -54,7 +54,7 @@
 // callback: an erase+copy takes seconds and must run interrupts-off, which would
 // freeze the split thread. The short delay lets the master receive the COMMIT ack
 // before the link is torn down.
-#define BK_SPLIT_FLASH_COMMIT_DELAY_MS 250
+#define BK_SPLIT_FLASH_COMMIT_DELAY_MS 100
 
 // Staging slot in flash (offset from the start of flash): 1 MiB in, 256 KiB
 // capacity, clear of the running image and of the wear-leveling EEPROM region
@@ -69,8 +69,12 @@
 // is erased, so the stream starts as soon as the secondary is actually able to
 // receive it. Probes retry every PROBE_RETRY_MS and give up after
 // PROBE_TIMEOUT_MS if the secondary never appears (e.g. a lone master).
-#define BK_SPLIT_FLASH_PROBE_RETRY_MS 250
+#define BK_SPLIT_FLASH_PROBE_RETRY_MS 100
 #define BK_SPLIT_FLASH_PROBE_TIMEOUT_MS 15000
+
+// During the active data stream, temporary keyboard unresponsiveness is allowed;
+// bound each master-loop burst so USB and recovery work still get service.
+#define BK_SPLIT_FLASH_DATA_BURST_CHUNKS 8
 
 typedef struct bk_split_flash_m2s_t {
     uint32_t seq;

@@ -316,8 +316,9 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      states, with the exact parameters from the States bullet.
 
 8. **Speed optimization.** Measure and reduce the end-to-end clone duration and time-to-first-transfer after
-   the secondary becomes available, without changing the verified clone safety model or making the keyboard
-   unusable.
+   the secondary becomes available, without changing the verified clone safety model. Temporary keyboard
+   unresponsiveness during the active flash is allowed; the keyboard must boot, recover, and operate normally
+   after clone completion or failure.
    - **Scope:** optimize only after step 6 reliability and step 7 indication are validated; keep the
      adaptive readiness probe's immediate-start behaviour as the startup baseline.
    - **Candidates:** reduce avoidable per-transaction overhead, improve safe chunk/housekeeping cadence,
@@ -325,10 +326,11 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      rate only if both halves remain reliable at that setting.
    - **Constraints:** every slave callback remains O(1) and comfortably inside `SERIAL_USART_TIMEOUT`; no
      long erase/read-back work moves into the transaction callback; preserve packet/read-back/bootability
-     checks, link recovery, and normal keyboard responsiveness.
+     checks and link recovery. The master may block normal keyboard processing during the active flash, but
+     must recover to normal operation afterward.
    - **Measurement:** report image size, chunk count, time from power-on to first accepted `BEGIN`, total
-     transfer time, total clone time, and keyboard responsiveness. Compare against the validated step-6/7
-     baseline and keep one firmware artefact per optimization step.
+     transfer time, total clone time, and post-clone keyboard responsiveness. Compare against the validated
+     step-6/7 baseline and keep one firmware artefact per optimization step.
    - **Assertion:** the optimized build is faster by a measured amount, still passes the complete clone and
      recovery flow, and does not regress the readiness-probe or safety verdicts.
 

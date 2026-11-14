@@ -906,9 +906,9 @@ void housekeeping_task_bk_split_flash(void) {
         return;
     }
 
-    // One transaction per call. While waiting for the secondary to boot
-    // (phase IDLE/BEGIN) the BEGIN probe is throttled to PROBE_RETRY_MS; once
-    // the stream is flowing nothing is throttled.
+    // While waiting for the secondary to boot (phase IDLE/BEGIN) the BEGIN
+    // probe is throttled to PROBE_RETRY_MS; once the stream is flowing, send a
+    // bounded burst because temporary keyboard unresponsiveness is allowed.
     if (bk_phase == BK_STREAM_IDLE || bk_phase == BK_STREAM_PREPARE || bk_phase == BK_STREAM_READY || bk_phase == BK_STREAM_BEGIN) {
         if ((int32_t)(timer_read32() - bk_probe_at_ms) < 0) {
             return;
@@ -919,5 +919,11 @@ void housekeeping_task_bk_split_flash(void) {
         bk_stream_start();
     }
 
-    bk_stream_step();
+    if (bk_phase == BK_STREAM_DATA) {
+        for (uint8_t chunk = 0; chunk < BK_SPLIT_FLASH_DATA_BURST_CHUNKS && bk_phase == BK_STREAM_DATA; chunk++) {
+            bk_stream_step();
+        }
+    } else {
+        bk_stream_step();
+    }
 }
