@@ -6,12 +6,17 @@
 // Split-secondary flash clone: the master streams its own firmware image to the
 // secondary over the split link, one fixed-size transaction per chunk.
 //
-// Step 3: the secondary writes each received chunk into a staging slot in flash
-// (erased at boot, ahead of the stream) and the result is verified by reading the
-// slot back and comparing its CRC-32 against the master's whole-image CRC-32. No
-// commit and no reboot: the keyboard stays usable. Transport and flash integrity
-// are reported with distinct markers, so a failure is unambiguously one or the
-// other.
+// Step 4: on top of step 3 (write the stream to staging and verify the read-back
+// CRC), the secondary also proves the staged image is *bootable* (RP2040 boot2
+// checksum + vector-table plausibility) and then commits it: one interrupts-off,
+// RAM-resident routine erases the active region, copies staging over it (boot2
+// last) and resets into the new image.
+//
+// The commit is skipped when the staged image already matches the secondary's
+// active image, so the 20 s cadence does not reboot the secondary forever. For
+// this validation step the master forces exactly one commit on its first run
+// after boot (the images are identical when both halves run the same UF2); step 5
+// replaces that with a Bootmagic-gated trigger.
 //
 // The split protocol takes the byte counts from the transaction table, not the
 // wire, so the sizes are fixed at compile time (unchanged from step 1's proven
@@ -26,13 +31,26 @@
 #define BK_SPLIT_FLASH_SEQ_BEGIN 0u            // offset carries the image length; (re)sets the slave state
 #define BK_SPLIT_FLASH_SEQ_REPORT 0xFFFFFFFFu  // slave answers with its rolling CRC-32 over the received bytes
 #define BK_SPLIT_FLASH_SEQ_VERIFY 0xFFFFFFFEu  // slave answers with a CRC-32 of the staging read-back
+// `offset` carries the force flag: non-zero commits even when the staged image
+// already matches the active one (used by the step-4 validation one-shot).
+#define BK_SPLIT_FLASH_SEQ_COMMIT 0xFFFFFFFCu
 
 // Slave acknowledgements (s2m.ack). An accepted data chunk is acked with its own seq
 // (1..N), so these sentinels cannot collide with a valid ack.
-#define BK_SPLIT_FLASH_ACK_BEGIN 0xFFFFFFFFu    // begin / state reset accepted
-#define BK_SPLIT_FLASH_ACK_SEQ_ERR 0u           // out-of-order chunk, or no stream active
-#define BK_SPLIT_FLASH_ACK_CRC8_ERR 0xFFFFFFFEu // chunk CRC-8 mismatch
-#define BK_SPLIT_FLASH_ACK_LEN_ERR 0xFFFFFFFDu  // begin rejected: image larger than the erased staging slot
+#define BK_SPLIT_FLASH_ACK_BEGIN 0xFFFFFFFFu     // begin / state reset accepted
+#define BK_SPLIT_FLASH_ACK_SEQ_ERR 0u            // out-of-order chunk, or no stream active
+#define BK_SPLIT_FLASH_ACK_CRC8_ERR 0xFFFFFFFEu  // chunk CRC-8 mismatch
+#define BK_SPLIT_FLASH_ACK_LEN_ERR 0xFFFFFFFDu   // begin rejected: image larger than the erased staging slot
+#define BK_SPLIT_FLASH_ACK_COMMIT 0xFFFFFFFBu    // bootable and (forced or differing): the secondary will commit
+#define BK_SPLIT_FLASH_ACK_MATCH 0xFFFFFFFAu     // staged image already matches the active image; commit skipped
+#define BK_SPLIT_FLASH_ACK_BOOT_ERR 0xFFFFFFF9u  // boot2 checksum or vector-table check failed
+#define BK_SPLIT_FLASH_ACK_FLASH_ERR 0xFFFFFFF8u // staged read-back differs from what was received
+
+// The secondary commits from its housekeeping loop, not from the transaction
+// callback: an erase+copy takes seconds and must run interrupts-off, which would
+// freeze the split thread. The short delay lets the master receive the COMMIT ack
+// before the link is torn down.
+#define BK_SPLIT_FLASH_COMMIT_DELAY_MS 250
 
 // Staging slot in flash (offset from the start of flash): 1 MiB in, 256 KiB
 // capacity, clear of the running image and of the wear-leveling EEPROM region

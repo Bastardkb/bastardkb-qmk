@@ -17,12 +17,13 @@ behaviour changes.**
 
 ## Non-goals (explicitly out of MVP scope)
 
-- No automatic fingerprint / handshake / version negotiation — the trigger is explicit. *(Under revision:
-  see work step 5 — user wants an automatic trigger.)*
+- No automatic fingerprint / handshake / version negotiation — the trigger is explicit (Bootmagic on the
+  master, decided for work step 5).
 - No transferring a foreign image (only the master's own image).
 - No progress UI beyond a minimal indicator (the LED indicator defined in work step 7).
 - No EEPROM / handedness semantics changes.
-- No baud tuning (stay at 230400).
+- No further baud tuning (the `-km vendor` userspace config already sets `SERIAL_USART_SPEED 625000`; the
+  link is wire-bound at ~62.5 KB/s).
 
 ## Architecture — how it works
 
@@ -34,8 +35,10 @@ behaviour changes.**
 - The slave dispatches **any** transaction id `< NUM_TOTAL_TRANSACTIONS` via `split_transaction_table[id]`
   — fixed m2s/s2m sizes, shmem offsets, and a callback — serviced by the split protocol thread
   (`serial_protocol.c:51-94`). **Lengths come from the table, not the wire.**
-- Throughput is wire-bound: 230400 baud ≈ 23 KB/s, so a ~92 KiB image is ≈ **4 s of wire time** (≈ 5–7 s
-  including per-chunk flash writes and the pre-erase).
+- Throughput is wire-bound. The current `-km vendor` build runs at **625000 baud** (userspace
+  `users/vendor/config.h`, confirmed in the build's `cflags.txt`): ~62.5 KB/s, ~4 ms per 246 B chunk, so a
+  ~92 KiB image is ≈ **1.6 s of wire time** (≈ 2–3.5 s including per-chunk flash writes; the pre-erase runs
+  at slave boot). The earlier 230400-based ≈4 s estimate applied before the userspace override.
 
 ### Transport choice: one transaction per chunk — NOT the 4-phase RPC
 
@@ -60,9 +63,10 @@ behaviour changes.**
 
 ### The trigger
 
-- **Under revision (see work step 5).** Was: explicit (a key held at boot, or Bootmagic) — **never** a
-  boot-time auto-detect. The user now wants it **automatic** after the master is updated, with **no second
-  bootmagic**; mechanism TBD. Mind the dilemma Bootmagic L00 caveat in the knowledge base.
+- **Bootmagic on the master (user decision, 2026-11-14; implemented in step 5).** A key held at master boot
+  starts the clone and forces the commit. **Never** a boot-time auto-detect. Mind the dilemma Bootmagic L00
+  caveat in the knowledge base (L00 already enters BOOTSEL), so the trigger must use a non-conflicting key or
+  run after Bootmagic handling.
 
 ## Ordered work steps (riskiest / most important first)
 
@@ -128,16 +132,42 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
    - **Re-clone guard (required for "keyboard stays usable"):** skip the commit when the staged image already
      matches the slave's active image — otherwise the current 20 s cadence would commit+reboot every 20 s and
      the secondary would never be usable. Needs the slave to CRC its **active** region for the comparison.
+   - **Step-4 validation one-shot (user decision, 2026-11-14).** With both halves flashed from the same UF2 the
+     staged image equals the active image, so the guard would skip forever and the commit path would never run
+     on hardware. For this step only, the master forces **exactly one** commit on its first run after boot:
+     `COMMIT.offset != 0` bypasses the equality guard, while the read-back and bootability checks still apply.
+     Afterwards the guard takes over. This is temporary — step 5 ties the force to the Bootmagic trigger
+     instead of "first run after boot", so outside the trigger no re-flash happens.
+   - **Confirmed knobs:** the guard's active CRC is accumulated **per 256 B page while staging** (alongside
+     the read-back CRC), so COMMIT stays O(1). The COMMIT callback runs the boot2/vector checks and the guard
+     and only **schedules**; the slave's `housekeeping_task` runs the RAM-resident commit after a 250 ms delay
+     (enough for the ack to leave first). The commit calls `flash_range_erase/program` through **volatile
+     function pointers**: a direct RAM→RAM call needs a long-branch veneer that the linker places in **flash**,
+     and erasing sector 0 would destroy it (see the KB). The commit erases `round_up(image_len, 4096)`
+     (93692 B → 94208 B, 23 sectors) at `0..0x17000`, clear of staging (0x100000) and the EEPROM (0x1FE000);
+     it programs pages 1..N-1, then page 0 (boot2) last, then resets via AIRCR `SYSRESETREQ`.
    - **Reboot + recovery:** clean system reset after the commit; the master must tolerate the secondary
-     dropping off the link and reappearing (and must not immediately re-trigger). A mid-commit power loss
-     leaves no valid vectors — the handoff must document the BOOTSEL recovery (hold L00 / double-tap).
+     dropping off the link and reappearing (and must not immediately re-trigger): after the COMMIT verdict the
+     master re-arms its next run 20 s later. A mid-commit power loss leaves no valid vectors — the handoff
+     must document the BOOTSEL recovery (hold L00 / double-tap).
    - **Assertion:** both halves boot the new image, the link recovers, the keyboard types, and the secondary
-     does **not** re-commit on the next cadence.
+     does **not** re-commit on the next cadence (first run `action=commit`, later runs `action=skip`).
+   - **STATUS: DONE (2026-11-14).** Hardware PASS on `bastardkb/dilemma/4x6_4_procyon` (`-km vendor`). Run 1:
+     `BKCLONE: step=3 transport chunks=406 bytes=93692 crc=0x02C06F09 slave=0x02C06F09 ok`,
+     `BKCLONE: step=3 flash bytes=93692 crc=0x02C06F09 readback=0x02C06F09 ok`,
+     `BKCLONE: step=4 commit bytes=93692 boot2=0xD58F0B07 action=commit ok` — the secondary erased, copied,
+     wrote boot2 last and reset. Run 2 (next cadence, after the secondary reappeared):
+     `step=3 transport … ok`, `step=3 flash … ok`, `step=4 commit bytes=93692 boot2=0xD58F0B07 action=skip ok`
+     — the link recovered and the re-clone guard skipped. This UF2 (`bk_split_flash_step4.uf2`) is the **golden
+     known-good**. (The whole-image CRC is build-specific because `QMK_BUILDDATE` is embedded; the check is
+     that master/slave/readback agree.)
 5. **Trigger.** Wire the trigger to start the whole flow.
-   - **OPEN (user request 2026-11-14):** the trigger should be **automatic** — the master copies to the
-     secondary right after the master itself is updated, with **no second bootmagic**. Mechanism (build-id
-     fingerprint vs. copy-on-every-boot) still to be decided; this supersedes the "explicit trigger" wording
-     once decided. Either way a deferred wait is needed for the ~3 s master→secondary boot skew.
+   - **DECIDED (user, 2026-11-14): Bootmagic on the master.** A key held at master boot starts the clone and
+     **auto-forces** the commit (replacing step 4's "first run after boot" force). The 20 s cadence and the
+     unconditional first-run force exist only for step-4 validation; here they are gated by the trigger, so
+     outside it no re-flash happens. Open detail: L00 already enters BOOTSEL on this board (KB), so choose a
+     non-conflicting trigger key/combo or run the check after Bootmagic handling. A deferred wait is still
+     needed for the ~3 s master→secondary boot skew.
 6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
    - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
      image length and rejects a longer `BEGIN`. That only holds while both halves run the same UF2 — but the
@@ -169,14 +199,16 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
 ## Harness / test protocol
 
 - One UF2 per step: `qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`.
-- Each step prints **exactly one machine-greppable marker line** (e.g. `BKCLONE: step=1 chunks=1 crc=0x… ok`).
+- Each step prints **exactly one machine-greppable verdict line** (e.g. `BKCLONE: step=1 chunks=1 crc=0x… ok`).
+  Steps 3–4 also print the prerequisite `step=3 transport` / `step=3 flash` lines as evidence; the new verdict
+  is the `step=4 commit … action=commit|skip` line.
 - The human flashes **both** halves, connects **only the primary's** USB, power-cycles, captures the full
   console from power-on for the needed window, and pastes it back.
 - Keep a **golden UF2** (last known-good). After every flash, confirm the keyboard still boots and types.
   `qmk compile` copies its output over `<QMK_HOME>/<name>.uf2` **and** `<QMK_USERSPACE>/<name>.uf2`, so an
   earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
   distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
-  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step3.uf2`.
+  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step4.uf2`.
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)

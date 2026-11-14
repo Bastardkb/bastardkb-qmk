@@ -119,9 +119,13 @@ plan/status belongs in the plan documents, not here.
   `id ^ NUM_TOTAL_TRANSACTIONS`, sends the m2s buffer, receives the s2m buffer.
 - The slave's protocol runs in a dedicated thread (`SlaveThread`, HIGHPRIO, `serial_protocol.c:18-39`), so a
   slave callback that blocks (e.g. a flash write) blocks the whole link.
-- Half-duplex vendor serial, 230400 baud on this board (`SERIAL_USART_SPEED`); `SERIAL_DRIVER = vendor`.
-  Throughput is wire-bound: ~23 KB/s. The PIO driver derives its clock from `SERIAL_USART_SPEED`
-  (`serial_vendor.c:358`), so raising the baud is a config change.
+- Half-duplex vendor serial; `SERIAL_DRIVER = vendor`. The **current `-km vendor` build runs at 625000 baud**
+  — the userspace `users/vendor/config.h` sets `SERIAL_USART_SPEED 625000` and the build includes it
+  (`-include …/users/vendor/config.h`, confirmed in the build's `cflags.txt`). That is ~62.5 KB/s, ~4 ms per
+  246-byte chunk, ~1.6 s of wire time for the 93692 B step-4 image. The earlier 230400 figure (≈23 KB/s,
+  ~11 ms/chunk) matches the steps 1–3 measurements taken before that override; the 2026-11-14 plan's
+  "stay at 230400" non-goal is stale. The PIO driver derives its clock from `SERIAL_USART_SPEED`
+  (`serial_vendor.c:358`), so the baud remains a config change.
 - Each failed `serial_transport_receive` blocks its caller for up to `SERIAL_USART_TIMEOUT` (default 20 ms,
   `serial_usart.h:43-45`).
 - `connection_errors` (hence `is_transport_connected()`, `split_util.c:230-231`) is only updated by the base
@@ -217,8 +221,20 @@ plan/status belongs in the plan documents, not here.
 - **Callers may stay in flash** (XIP is re-enabled between each op); only code executing *during* an op must
   be RAM-resident. Exception: if the active region is being erased/rewritten, the loop between ops must ALSO
   be RAM (its own code is in the erased region), so such a routine must be `__no_inline_not_in_flash_func`
-  (→ `.time_critical.*` → RAM `.data`) and must not call memcpy/print/etc. The linker may emit a flash
-  `*_veneer` stub for cross-TU calls into it — harmless (runs with XIP up).
+  (→ `.time_critical.*` → RAM `.data`) and must not call memcpy/print/etc. **Beware the linker's veneers:** a
+  direct call from such a RAM routine into another RAM function (e.g. `flash_range_erase`) is a cross-region
+  call, and the linker resolves it with a `*_veneer` stub placed in **flash** (`__flash_range_erase_veneer` /
+  `__flash_range_program_veneer` were at 0x100139b0.. in the step-4 map). Once sector 0 is erased that stub is
+  gone, so the *next* call faults. Call the RAM flash primitives through a **`volatile` function pointer**
+  instead: the indirect `blx` needs no veneer and survives the erase (verified in the step-4 disassembly — the
+  pointer words hold RAM addresses 0x200003xx and the commit routine uses `blx`). The flash→RAM call *into*
+  the commit routine may use a flash veneer; that call happens with XIP up, before the erase.
+- **Sector-0 erase order vs boot2 copy-out:** `flash_range_erase`/`_program` call
+  `flash_init_boot2_copyout()` on their first XIP exit, which snapshots the 256-byte boot2 from the *current*
+  sector 0 into RAM and re-enters XIP via that copy. So the commit's first op must be the erase of sector 0
+  (the snapshot happens before it disappears), and boot2 (page 0) must be programmed last so the image only
+  becomes bootable at the end. In normal operation the snapshot was already taken by the earlier staging
+  erase, and the boot2 blob is chip-specific rather than image-specific.
 - **Erase must run outside any transaction:** `flash_range_erase`/`_program` require interrupts disabled, and
   with IRQs off the ChibiOS scheduler is stopped, so the slave's `SlaveThread` cannot service the link for the
   duration of the op. A 256 B page program (~1–5 ms) fits inside the 20 ms transport read timeout from a
@@ -255,6 +271,21 @@ plan/status belongs in the plan documents, not here.
 - **Vector table offset:** in a QMK/ChibiOS RP2040 image, boot2 occupies image[0,256) and the ARM vector
   table starts at 0x100 — the initial SP word is at image+0x100 and the reset vector at image+0x104 (a real
   image: sp=0x20040400, pc=0x100002c5).
+- **Vector-table plausibility gate:** SRAM is `[0x20000000, 0x20042000)` (264 KiB). A staged image is
+  treated as plausibly bootable when the initial SP is word-aligned and inside that range, and the reset
+  vector is odd (Thumb), inside the image, and past the vector table. Both are O(1) reads, so the COMMIT
+  callback can run them inside the 20 ms window.
+- **Step-4 verified values (same build on both halves):** image len 93692 B (406 chunks), boot2 checksum
+  `0xD58F0B07`, sp `0x20040400`, reset `0x100002C5`; rounded staging erase = 94208 B (23 sectors). The boot2
+  checksum was re-derived with `pad_checksum`'s exact expression and matches the raw-table formula in the
+  module. The **whole-image CRC-32 is build-specific** — `via.c` embeds `QMK_BUILDDATE` (build date/time) in
+  the image, so it changes on every rebuild; the runtime check is that the master/slave/readback CRCs match
+  each other, not a fixed value.
+- **Commit must run from housekeeping, not the callback:** an erase+copy takes seconds with IRQs off, so the
+  COMMIT callback only records the request (and runs the O(1) bootability/read-back checks); the slave's
+  `housekeeping_task` runs the RAM-resident commit after a short delay, long enough for the master to receive
+  the acknowledgment. Freezing the link while the secondary resets is expected; the master's base sync
+  retries and reconnects when the secondary is back.
 - **GP17** is the BKB status LED (`RP2040_BOOTLOADER_DOUBLE_TAP_RESET_LED`), not used by matrix/RGB, free
   after boot; QMK chibios `GP17` is literally the numeral `17`, so `sio_hw->gpio_set/clr = 1u<<17` works to
   pulse it from RAM-resident code (configure SIO output beforehand via pico `gpio_set_function` /
