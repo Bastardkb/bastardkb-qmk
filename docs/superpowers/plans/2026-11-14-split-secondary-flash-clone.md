@@ -8,12 +8,12 @@
 
 ## Current status (read this + your step first; pull the rest only on demand)
 
-- **Done: steps 1–7. Step 7 was hardware-validated; a subsequent brightness-only source tweak is not yet rebuilt. Step 8 (speed optimization) remains scoped, not started.**
+- **Done: steps 1–8. Step 8 was hardware-validated with the optimized secondary/master pair.**
 - **AMENDED (user, 2026-11-14): the trigger's fixed 5 s first-run delay is replaced by an adaptive
   readiness probe.** The master now prints the `step=5 trigger=1|0` marker immediately on its first
   housekeeping call, and a triggered clone streams as soon as the secondary is able to receive it: the
   `BEGIN` transaction doubles as the probe (the secondary only acks `BEGIN` once its split thread is up and
-  its staging slot is erased), retried every `BK_SPLIT_FLASH_PROBE_RETRY_MS` (250 ms) and giving up with a
+  its staging slot is erased), retried every `BK_SPLIT_FLASH_PROBE_RETRY_MS` (100 ms) and giving up with a
   `begin-tx` FAIL verdict after `BK_SPLIT_FLASH_PROBE_TIMEOUT_MS` (15 s) if the secondary never appears
   (e.g. a lone master). Each failed probe is a plain `SERIAL_USART_TIMEOUT` round-trip; nothing is logged
   during the wait, so the harness's "one verdict line" contract is unchanged.
@@ -54,6 +54,22 @@
   (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`),
   flash **both** halves, connect only the primary's USB, full console from power-on, exactly one greppable
   `BKCLONE:` verdict line.
+- **PASS (user, 2026-11-14): Step 8 speed optimization validated on hardware.** The optimized pair enabled
+  table-driven CRC-8, sent bounded eight-chunk master bursts, reduced readiness-probe retry from 250 ms to
+  100 ms, and reduced the deferred commit delay from 250 ms to 100 ms. The user observed that cloning was
+  substantially faster than the Step 6/7 baseline, with the validated 625000 baud rate unchanged. The pair
+  preserved the clone safety and recovery paths and used distinct images:
+  `bk_split_flash_step8_secondary.uf2` (SHA-256
+  `2f5de7b491f24f5992368abe3b1bec6ec3f5c355a3ff26a9e6b7f8024119d20c`) and
+  `bk_split_flash_step8_master.uf2` (SHA-256
+  `0d174f68a26be5e5b7965872b5c2a55b1fdec265647d169afb425890e3712cec`). The master image was deliberately
+  enlarged and verified with the retained `bk_step8_master_payload` symbol of size `0x1000`.
+- **Retrospective:** The bounded burst and shorter probe/commit waits produced the meaningful speed improvement;
+  table-driven CRC-8 was a safe supporting optimization. The first build-only master payload attempt changed
+  the UF2 hash without enlarging the linked image because the unreferenced section was garbage-collected;
+  the root cause was relying on `used` without a retained reference. A referenced volatile payload was used
+  for the final pair, and its `0x1000` symbol size and larger artefact were verified before handoff. No further
+  optimization was pursued after the speed improvement was confirmed.
 
 ## Objective (the MVP)
 
@@ -191,7 +207,7 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      instead of "first run after boot", so outside the trigger no re-flash happens.
    - **Confirmed knobs:** the guard's active CRC is accumulated **per 256 B page while staging** (alongside
      the read-back CRC), so COMMIT stays O(1). The COMMIT callback runs the boot2/vector checks and the guard
-     and only **schedules**; the slave's `housekeeping_task` runs the RAM-resident commit after a 250 ms delay
+     and only **schedules**; the slave's `housekeeping_task` runs the RAM-resident commit after a 100 ms delay
      (enough for the ack to leave first). The commit calls `flash_range_erase/program` through **volatile
      function pointers**: a direct RAM→RAM call needs a long-branch veneer that the linker places in **flash**,
      and erasing sector 0 would destroy it (see the KB). The commit erases `round_up(image_len, 4096)`
@@ -240,7 +256,7 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
       marker on the first master housekeeping call; only `trigger=1` runs the stream, **once** (no 20 s
       cadence; `BK_SPLIT_FLASH_RUN_PERIOD_MS` removed), **starting as soon as the secondary is online**: the
       `BEGIN` transaction doubles as the readiness probe (the secondary only acks `BEGIN` once booted with
-      its staging slot erased), retried every 250 ms and given up after 15 s if the secondary never appears
+      its staging slot erased), retried every 100 ms and given up after 15 s if the secondary never appears
       (`BK_SPLIT_FLASH_FIRST_RUN_DELAY_MS` removed; see the AMENDED note in the status header). The step-4
       commit force is removed: the re-clone guard decides (new image ⇒ `commit`, identical ⇒
      `skip`). The fingerprint is persisted only on a `commit`/`skip` verdict, so a failed clone re-triggers on
