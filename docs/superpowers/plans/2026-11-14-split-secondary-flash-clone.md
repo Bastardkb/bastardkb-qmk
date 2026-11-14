@@ -8,8 +8,7 @@
 
 ## Current status (read this + your step first; pull the rest only on demand)
 
-- **Done: steps 1–5. In progress: step 6 (Harden). Steps 7 (visual indicator) and 8 (speed optimization)
-  are scoped, not started.**
+- **Done: steps 1–6. Steps 7 (visual indicator) and 8 (speed optimization) are scoped, not started.**
 - **AMENDED (user, 2026-11-14): the trigger's fixed 5 s first-run delay is replaced by an adaptive
   readiness probe.** The master now prints the `step=5 trigger=1|0` marker immediately on its first
   housekeeping call, and a triggered clone streams as soon as the secondary is able to receive it: the
@@ -28,18 +27,21 @@
   housekeeping task erases exactly the required rounded length, and the master polls a ready operation
   before sending `BEGIN`/data. This avoids erasing the full 256 KiB slot on every secondary boot while
   supporting a master image larger than the currently installed secondary image.
+- **PASS (user, 2026-11-14): Step 6 hardening validated on hardware.** The secondary ran the normal Step 6
+  image and the master ran a distinct Step 6 image with a retained 4 KiB payload, proving a larger master
+  image can request deferred staging preparation. The console showed `step=6 staging ... ready ok` before
+  transport, flash, and `action=commit` all passed; the keyboard remained usable after the secondary reboot.
+  Artifacts: `bk_split_flash_step6_secondary.uf2` and `bk_split_flash_step6_master_large.uf2`.
 - **PASS (user, 2026-11-14): adaptive probe validated on hardware.** Image A produced the immediate
   `trigger=1` → transport → flash → `action=skip` path; Image B (a distinct 1 ms timeout variant used only
   to force a different fingerprint) cloned onto the Image-A secondary with `action=commit`, rebooted the
   secondary, and the keyboard remained usable. The normal 15-second Image A is the new baseline golden:
   `bk_split_flash_probeA.uf2`.
 - Last PASS: adaptive-probe amendment, 2026-11-14 — golden `bk_split_flash_probeA.uf2` (in `$QMK_USERSPACE`).
-- Next blockers, in order: step 6 must resolve the staging-erase sizing (erase a fixed
-  `BK_SPLIT_FLASH_STAGING_MAX`, or a deferred `prepare(length)` + slave-housekeeping erase + master poll)
-  before validating a master image newer/larger than the secondary's; step 7's remaining LED states
-  (idle / in-progress / success) still need user confirmation before implementing (the failure /
-  mismatched-versions state is now specified).
-- Harness ground rules: one UF2 per step (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`),
+- Next blocker: step 7's remaining LED states (idle / in-progress / success) still need user confirmation
+  before implementing (the failure / mismatched-versions state is now specified).
+- Harness ground rules: one or more explicitly named UF2 artifacts may be required for crossing-build validation
+  (`qmk compile -kb bastardkb/dilemma/4x6_4_procyon -km vendor`),
   flash **both** halves, connect only the primary's USB, full console from power-on, exactly one greppable
   `BKCLONE:` verdict line.
 
@@ -252,15 +254,21 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      non-conflicting trigger key/combo or run the check after Bootmagic handling. A deferred wait is still
      needed for the ~3 s master→secondary boot skew.
 6. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication through console.
-   - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
+    - **Staging-erase sizing (gates step 5).** Step 3 erases the staging slot from the **secondary's own**
      image length and rejects a longer `BEGIN`. That only holds while both halves run the same UF2 — but the
      trigger's whole point is "master pushes its image **after the master is updated**", so the master's image
      can be **newer/larger** than the secondary's, giving `LEN_ERR` and no clone. **Decision:** size the
      staging region from the **master's** declared length with a `prepare(length)` op whose callback only
      records the length (O(1)); erase the rounded length in the slave `housekeeping_task`, and have the master
      poll a ready op before `BEGIN`/data (the async pattern `AGENTS.md` mandates). This avoids the fixed
-     `BK_SPLIT_FLASH_STAGING_MAX` boot erase (~256 KiB ≈ 2.9 s) and must be resolved before the automatic
-     trigger (step 5) is validated with a master image that differs from the secondary's.
+      `BK_SPLIT_FLASH_STAGING_MAX` boot erase (~256 KiB ≈ 2.9 s) and must be resolved before the automatic
+      trigger (step 5) is validated with a master image that differs from the secondary's.
+    - **STATUS: DONE (2026-11-14).** Implemented `PREPARE(length)` and `READY`/`BUSY` polling. The callback
+      only records or reports state; secondary housekeeping erases the rounded requested length. Prepare,
+      ready, and begin transport failures share the bounded 15-second probe deadline, and repeated prepare
+      requests are idempotent after a lost response. Hardware PASS used separate secondary and deliberately
+      larger master UF2 images; the larger master staged, committed, rebooted the secondary, and left the
+      keyboard usable.
 
 7. **Visual indicator (LED).** Give the user an on-keyboard indication of a running master→secondary clone,
    using the keyboard's addressable LEDs (RGB matrix / underglow) — this is the "minimal indicator" carved
@@ -278,21 +286,14 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      run different firmware versions — the automatic flash failed (transport/flash/boot/commit fail, or
      the 15 s probe give-up: secondary never online) — the master shows **red breathing**: RGB matrix mode
      `RGB_MATRIX_BREATHING`, speed **255**, colour **`HSV_RED`**, brightness **150**, held until the
-     mismatch is gone (a later successful clone, or both halves re-flashed).
+     mismatch is gone (a later successful clone, or both halves re-flashed). A successfull clone / re-flash will flash green lights three times in a on(.5 seconds)/off(.5 seconds) pattern.
    - **Assertion:** flash both halves, trigger the flow, and confirm the keyboard shows the in-progress
       indication for the duration, then the success indication at completion, then returns to normal.
       Print one marker (`BKCLONE: step=7 …`) alongside the visual state. **Failure assertion:** flash a new
       build onto **only the primary** (secondary off/detached so the probe gives up at 15 s), and confirm
       the master then shows the red breathing state (mode `RGB_MATRIX_BREATHING`, speed 255, `HSV_RED`,
       brightness 150) and keeps it until a successful clone or re-flash — and confirm a successful
-      `action=commit`/`skip` run shows **no** red.
-   - **User decision (2026-11-14, from step 5): move the red "firmware id desync" flashing out of argos into
-     bk_split_flash.** The userspace argos module (`argos.c`) currently drives a red breathing RGB error
-     state whenever the two halves' build IDs differ (`__DATE__`/`__TIME__` compile constants, not EEPROM
-     content), gated by `rgb_matrix_indicators_advanced_argos` → `argos_sides_have_different_firmware_id()`.
-      That code moves into bk_split_flash (it owns the clone's semantics), and argos loses it. The build-id
-      sync itself (RPC_ID_BUILD_ID_SYNC, key blocking) stays in argos. This also removes the step-5 UX trap:
-      after a successful clone the argos red flash looked like a clone failure.
+      `action=commit`/`skip` run shows **no** red. A successfull clone / re-flash will flash green lights three times in a on(.5 seconds)/off(.5 seconds) pattern.
    - **Arming rule — red only when a clone attempt left the halves mismatched (user, 2026-11-14).** The
      moved indicator is gated by the **clone outcome**, not by any build-id difference. A **triggered**
      clone attempt that ends in failure — any `FAIL reason=…` verdict, or the 15 s probe give-up (secondary

@@ -60,6 +60,12 @@ session's context — **do not re-read it as a file.** Read, in order, only what
   images, compare their final artefact hashes before handing them off. If the hashes are identical, stop and
   resolve the build distinction instead of proceeding with a test that cannot exercise the differing-image
   path.
+- **Name crossing-image artefacts explicitly.** A crossing-image step may require multiple firmware artefacts;
+  the plan's validation topology overrides the default one-artefact rule. Before handoff, name each image's
+  target half and hash every distinct artefact.
+- **Verify deliberate image enlargement at link time.** When creating a deliberately distinct firmware image,
+  verify the linked image boundary or a retained symbol (for example, `__flash_binary_end` and the intended
+  payload symbol), not only the final UF2 hash. A different hash alone does not prove that the image is larger.
 
 ## Ask the user — don't assume
 
@@ -124,8 +130,8 @@ this step's plan wording** (not just the diff), with maintenance eyes.
 
 ## Handoff to the user (every deliverable)
 
-- Every step delivers exactly **ONE artefact** (typically one UF2) and **STOPS at the human validation
-  gate**.
+- Every step delivers exactly **ONE artefact** (typically one UF2), unless the plan explicitly requires a
+  crossing-image pair; in either case, **STOP at the human validation gate**.
 - Before finishing, hand the user — explicitly and in your final message:
   - the exact build command and the artefact path;
   - what the artefact is supposed to do;

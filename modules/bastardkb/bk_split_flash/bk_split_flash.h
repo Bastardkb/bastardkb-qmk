@@ -30,9 +30,11 @@
 #define BK_SPLIT_FLASH_SEQ_BEGIN 0u            // offset carries the image length; (re)sets the slave state
 #define BK_SPLIT_FLASH_SEQ_REPORT 0xFFFFFFFFu  // slave answers with its rolling CRC-32 over the received bytes
 #define BK_SPLIT_FLASH_SEQ_VERIFY 0xFFFFFFFEu  // slave answers with a CRC-32 of the staging read-back
+#define BK_SPLIT_FLASH_SEQ_PREPARE 0xFFFFFFFDu // offset carries the image length; requests deferred staging erase
 // `offset` carries the force flag: non-zero commits even when the staged image
 // already matches the active one (used by the step-4 validation one-shot).
 #define BK_SPLIT_FLASH_SEQ_COMMIT 0xFFFFFFFCu
+#define BK_SPLIT_FLASH_SEQ_READY 0xFFFFFFFBu   // slave reports whether deferred staging erase is complete
 
 // Slave acknowledgements (s2m.ack). An accepted data chunk is acked with its own seq
 // (1..N), so these sentinels cannot collide with a valid ack.
@@ -44,6 +46,9 @@
 #define BK_SPLIT_FLASH_ACK_MATCH 0xFFFFFFFAu     // staged image already matches the active image; commit skipped
 #define BK_SPLIT_FLASH_ACK_BOOT_ERR 0xFFFFFFF9u  // boot2 checksum or vector-table check failed
 #define BK_SPLIT_FLASH_ACK_FLASH_ERR 0xFFFFFFF8u // staged read-back differs from what was received
+#define BK_SPLIT_FLASH_ACK_PREPARE 0xFFFFFFF7u  // staging erase request accepted
+#define BK_SPLIT_FLASH_ACK_READY 0xFFFFFFF6u    // requested staging length is erased
+#define BK_SPLIT_FLASH_ACK_BUSY 0xFFFFFFF5u     // staging erase is pending or in progress
 
 // The secondary commits from its housekeeping loop, not from the transaction
 // callback: an erase+copy takes seconds and must run interrupts-off, which would

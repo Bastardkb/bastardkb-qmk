@@ -192,8 +192,13 @@ typedef struct {
 
 static bk_slave_stream_t bk_slave;
 
-// Bytes erased at post-init (0 = staging unavailable; begin is then rejected).
-static uint32_t bk_staging_erased;
+// Staging preparation is requested by the master and performed by slave
+// housekeeping. These fields are shared with the split protocol thread; the
+// callback only records or reports state and never performs an erase.
+static volatile uint32_t bk_staging_erased;
+static volatile uint32_t bk_staging_requested;
+static volatile bool     bk_staging_prepare_pending;
+static volatile bool     bk_staging_prepare_busy;
 
 // Commit scheduling. The COMMIT callback runs in the split thread, so it only
 // records the request; the slave's housekeeping task performs the long,
@@ -239,6 +244,44 @@ static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, 
 
     const bk_split_flash_m2s_t *m2s = (const bk_split_flash_m2s_t *)initiator2target_buffer;
     bk_split_flash_s2m_t       *s2m = (bk_split_flash_s2m_t *)target2initiator_buffer;
+
+    if (m2s->seq == BK_SPLIT_FLASH_SEQ_PREPARE) {
+        uint32_t len     = m2s->offset;
+        uint32_t rounded = (len + FLASH_SECTOR_SIZE - 1u) & ~(uint32_t)(FLASH_SECTOR_SIZE - 1u);
+
+        if (len == 0 || len > BK_SPLIT_FLASH_STAGING_MAX || rounded > BK_SPLIT_FLASH_STAGING_MAX) {
+            s2m->ack = BK_SPLIT_FLASH_ACK_LEN_ERR;
+            return;
+        }
+
+        // A lost PREPARE response must not restart an erase that is already
+        // running or erase the same completed staging range a second time.
+        if (bk_staging_prepare_busy) {
+            s2m->ack = (bk_staging_requested == rounded) ? BK_SPLIT_FLASH_ACK_PREPARE : BK_SPLIT_FLASH_ACK_BUSY;
+            return;
+        }
+        if (bk_staging_requested == rounded && (bk_staging_prepare_pending || bk_staging_erased >= rounded)) {
+            s2m->ack = BK_SPLIT_FLASH_ACK_PREPARE;
+            return;
+        }
+
+        bk_staging_requested       = rounded;
+        bk_staging_erased          = 0;
+        bk_staging_prepare_pending = true;
+        s2m->ack                   = BK_SPLIT_FLASH_ACK_PREPARE;
+        return;
+    }
+
+    if (m2s->seq == BK_SPLIT_FLASH_SEQ_READY) {
+        if (bk_staging_prepare_pending || bk_staging_prepare_busy) {
+            s2m->ack = BK_SPLIT_FLASH_ACK_BUSY;
+        } else if (bk_staging_erased >= bk_staging_requested && bk_staging_requested != 0) {
+            s2m->ack = BK_SPLIT_FLASH_ACK_READY;
+        } else {
+            s2m->ack = BK_SPLIT_FLASH_ACK_SEQ_ERR;
+        }
+        return;
+    }
 
     if (m2s->seq == BK_SPLIT_FLASH_SEQ_BEGIN) {
         // (Re)initialise the stream even when the request is rejected, so no state
@@ -345,23 +388,23 @@ static void bk_split_flash_register_transaction(void) {
     trans->slave_callback               = bk_split_flash_slave_callback;
 }
 
-// Erase the staging slot on the secondary, ahead of the stream: a 4 KiB sector
-// erase takes tens of ms and would blow the 20 ms transport read timeout if done
-// inside a transaction, so it runs once here instead. Interrupts are disabled for
-// the erase (XIP is off while it runs).
+// Erase the requested staging length outside the transaction callback. A 4 KiB
+// sector erase takes tens of ms and would blow the 20 ms transport read timeout.
 static void bk_split_flash_prepare_staging(void) {
-    uint32_t len     = (uint32_t)(__flash_binary_end - __flash_binary_start);
-    uint32_t rounded = (len + FLASH_SECTOR_SIZE - 1) & ~(uint32_t)(FLASH_SECTOR_SIZE - 1);
-
-    if (len == 0 || rounded > BK_SPLIT_FLASH_STAGING_MAX) {
-        bk_staging_erased = 0;
+    if (!bk_staging_prepare_pending || bk_staging_prepare_busy) {
         return;
     }
 
-    uint32_t ints = save_and_disable_interrupts();
+    bk_staging_prepare_busy    = true;
+    bk_staging_prepare_pending = false;
+
+    uint32_t rounded = bk_staging_requested;
+    uint32_t ints    = save_and_disable_interrupts();
     flash_range_erase(BK_SPLIT_FLASH_STAGING_OFFSET, rounded);
     restore_interrupts(ints);
-    bk_staging_erased = rounded;
+
+    bk_staging_erased       = rounded;
+    bk_staging_prepare_busy = false;
 }
 
 // The flash primitives live in RAM, but a direct call from a RAM-resident
@@ -421,18 +464,14 @@ static void __no_inline_not_in_flash_func(bk_split_flash_commit)(void) {
 
 void keyboard_post_init_bk_split_flash(void) {
     bk_split_flash_register_transaction();
-
-    // The master streams its own image to the secondary, so only the secondary
-    // needs a staging slot.
-    if (!is_keyboard_master()) {
-        bk_split_flash_prepare_staging();
-    }
 }
 
 // --- Master: drive one stream, one transaction per housekeeping call -----------
 
 typedef enum {
     BK_STREAM_IDLE = 0,
+    BK_STREAM_PREPARE,
+    BK_STREAM_READY,
     BK_STREAM_BEGIN,
     BK_STREAM_DATA,
     BK_STREAM_REPORT,
@@ -548,7 +587,9 @@ static void bk_stream_start(void) {
         bk_flash_marker(false, "empty", 0);
         bk_stream_finish();
     } else {
-        bk_phase = BK_STREAM_BEGIN;
+        bk_phase = BK_STREAM_PREPARE;
+        bk_probe_start_ms = timer_read32();
+        bk_probe_at_ms    = bk_probe_start_ms;
     }
 }
 
@@ -557,6 +598,53 @@ static void bk_stream_step(void) {
     bk_split_flash_s2m_t s2m = {0};
 
     switch (bk_phase) {
+        case BK_STREAM_PREPARE: {
+            m2s.seq    = BK_SPLIT_FLASH_SEQ_PREPARE;
+            m2s.offset = bk_image_len;
+
+            bool ok = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            if (ok && s2m.ack == BK_SPLIT_FLASH_ACK_PREPARE) {
+                bk_phase      = BK_STREAM_READY;
+                bk_probe_at_ms = timer_read32();
+            } else if (!ok) {
+                if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
+                    bk_transport_marker(false, "prepare-tx", 0);
+                    bk_stream_finish();
+                } else {
+                    bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
+                }
+            } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
+                bk_flash_marker(false, "len", 0);
+                bk_stream_finish();
+            } else {
+                bk_transport_marker(false, "prepare-ack", s2m.ack);
+                bk_stream_finish();
+            }
+            break;
+        }
+
+        case BK_STREAM_READY: {
+            m2s.seq = BK_SPLIT_FLASH_SEQ_READY;
+
+            bool ok = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            if (ok && s2m.ack == BK_SPLIT_FLASH_ACK_READY) {
+                xprintf("BKCLONE: step=6 staging bytes=%u ready ok\n", (unsigned)bk_image_len);
+                bk_phase      = BK_STREAM_BEGIN;
+                bk_probe_at_ms = timer_read32();
+            } else if (!ok || s2m.ack == BK_SPLIT_FLASH_ACK_BUSY) {
+                if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
+                    bk_transport_marker(false, !ok ? "ready-tx" : "ready-timeout", s2m.ack);
+                    bk_stream_finish();
+                } else {
+                    bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
+                }
+            } else {
+                bk_transport_marker(false, "ready-ack", s2m.ack);
+                bk_stream_finish();
+            }
+            break;
+        }
+
         case BK_STREAM_BEGIN: {
             m2s.seq    = BK_SPLIT_FLASH_SEQ_BEGIN;
             m2s.offset = bk_image_len;
@@ -685,6 +773,8 @@ static void bk_stream_step(void) {
 
 void housekeeping_task_bk_split_flash(void) {
     if (!is_keyboard_master()) {
+        bk_split_flash_prepare_staging();
+
         // The commit was requested from the split thread. Give the master time to
         // receive the acknowledgment, then run the long interrupts-off commit
         // here, where freezing the link is expected (the secondary is resetting).
@@ -721,7 +811,7 @@ void housekeeping_task_bk_split_flash(void) {
     // One transaction per call. While waiting for the secondary to boot
     // (phase IDLE/BEGIN) the BEGIN probe is throttled to PROBE_RETRY_MS; once
     // the stream is flowing nothing is throttled.
-    if (bk_phase == BK_STREAM_IDLE || bk_phase == BK_STREAM_BEGIN) {
+    if (bk_phase == BK_STREAM_IDLE || bk_phase == BK_STREAM_PREPARE || bk_phase == BK_STREAM_READY || bk_phase == BK_STREAM_BEGIN) {
         if ((int32_t)(timer_read32() - bk_probe_at_ms) < 0) {
             return;
         }
