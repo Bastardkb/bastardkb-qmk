@@ -441,7 +441,8 @@ typedef enum {
 } bk_stream_phase_t;
 
 static bk_stream_phase_t bk_phase;
-static uint32_t          bk_run_at_ms;   // absolute time of the first run start
+static uint32_t          bk_probe_start_ms; // when readiness probing began (give-up deadline)
+static uint32_t          bk_probe_at_ms;    // next BEGIN readiness probe attempt
 static bool              bk_scheduled;
 static uint32_t          bk_image_len;
 static uint32_t          bk_image_boot2; // boot2 checksum of this image (step-4 marker)
@@ -564,8 +565,16 @@ static void bk_stream_step(void) {
             if (ok && s2m.ack == BK_SPLIT_FLASH_ACK_BEGIN) {
                 bk_phase = BK_STREAM_DATA;
             } else if (!ok) {
-                bk_transport_marker(false, "begin-tx", 0);
-                bk_stream_finish();
+                // The secondary only acks BEGIN once it is booted and its staging
+                // slot is erased, so this transaction doubles as the readiness
+                // probe: keep retrying until the secondary is online, then give
+                // up after PROBE_TIMEOUT_MS (e.g. a lone master with no peer).
+                if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
+                    bk_transport_marker(false, "begin-tx", 0);
+                    bk_stream_finish();
+                } else {
+                    bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
+                }
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
                 bk_flash_marker(false, "len", 0);
                 bk_stream_finish();
@@ -693,26 +702,33 @@ void housekeeping_task_bk_split_flash(void) {
     }
 
     if (!bk_scheduled) {
-        bk_scheduled = true;
-        bk_triggered = bk_trigger_detect();
-        bk_run_at_ms = timer_read32() + BK_SPLIT_FLASH_FIRST_RUN_DELAY_MS;
+        bk_scheduled   = true;
+        bk_triggered   = bk_trigger_detect();
+        bk_trigger_marker(bk_triggered);
+        if (bk_triggered) {
+            // Probe immediately: the first BEGIN doubles as the readiness check.
+            bk_probe_start_ms = timer_read32();
+            bk_probe_at_ms    = timer_read32();
+        } else {
+            bk_done = true;
+        }
     }
 
     if (bk_done) {
         return;
     }
 
-    if (bk_phase == BK_STREAM_IDLE) {
-        if ((int32_t)(timer_read32() - bk_run_at_ms) < 0) {
+    // One transaction per call. While waiting for the secondary to boot
+    // (phase IDLE/BEGIN) the BEGIN probe is throttled to PROBE_RETRY_MS; once
+    // the stream is flowing nothing is throttled.
+    if (bk_phase == BK_STREAM_IDLE || bk_phase == BK_STREAM_BEGIN) {
+        if ((int32_t)(timer_read32() - bk_probe_at_ms) < 0) {
             return;
         }
-        bk_trigger_marker(bk_triggered);
-        if (bk_triggered) {
-            bk_stream_start();
-        } else {
-            bk_done = true;
-        }
-        return;
+    }
+
+    if (bk_phase == BK_STREAM_IDLE) {
+        bk_stream_start();
     }
 
     bk_stream_step();

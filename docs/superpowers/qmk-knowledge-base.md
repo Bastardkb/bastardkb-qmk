@@ -149,6 +149,19 @@ plan/status belongs in the plan documents, not here.
   `housekeeping_task` call (~4.5 s for 91820 B, ~11 ms/chunk), with the slave accumulating an incremental
   CRC-32 and returning it in the 4 B s2m at end of stream; master and slave values matched. The keyboard
   stayed usable during the burst (one transaction per main-loop iteration).
+- **Retrying the first transaction is a safe readiness probe (2026-11-14):** a master may re-send its first
+  transaction during the secondary's boot without corrupting anything. A probe in the window before the
+  module registered its table entry hits a **default-zeroed** `split_transaction_table`
+  (`transactions.c:983` `[0 ... N-1] = {0,0,0,0,0}`) → `slave_callback == NULL` and zeroed buffer sizes → the
+  slave replies with the XOR handshake but sends no s2m, so the master's s2m `serial_transport_receive`
+  times out (`SERIAL_USART_TIMEOUT` 20 ms) and `soft_serial_transaction` returns false. A probe during the
+  secondary's interrupts-off staging erase gets no response at all (the `SlaveThread` is starved), also a
+  plain timeout. The slave thread's clear-on-error (`serial_protocol.c:31-36`) self-recovers, and the master
+  clears its RX queue before every attempt (`soft_serial_transaction` → `serial_transport_driver_clear`).
+  So the module's `BEGIN` control op — which (re)initialises slave stream state and **only acks once the
+  staging slot is erased** (`bk_staging_erased`) — doubles as the readiness gate: retry it until it acks,
+  then stream; no separate handshake transaction needed. (> `BK_SPLIT_FLASH_PROBE_RETRY_MS` 250 / 15 s
+  give-up in the 2026-11-14 amendment.)
 
 ## Build-environment facts (observed in this workspace)
 

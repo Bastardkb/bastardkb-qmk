@@ -57,10 +57,15 @@
 #define BK_SPLIT_FLASH_STAGING_OFFSET 0x100000u
 #define BK_SPLIT_FLASH_STAGING_MAX 0x40000u
 
-// Master run schedule: a single run, delayed to clear the ~3 s the two halves'
-// boot times differ by on this board. The clone is one-shot (gated by the
-// trigger), so there is no periodic re-run.
-#define BK_SPLIT_FLASH_FIRST_RUN_DELAY_MS 5000
+// Master run cadence: the clone is one-shot (gated by the trigger), so there is
+// no periodic re-run. Instead of a fixed delay to clear the ~3 s master/secondary
+// boot skew, the master uses the BEGIN transaction itself as a readiness probe:
+// the secondary only acks BEGIN once its split thread is up and its staging slot
+// is erased, so the stream starts as soon as the secondary is actually able to
+// receive it. Probes retry every PROBE_RETRY_MS and give up after
+// PROBE_TIMEOUT_MS if the secondary never appears (e.g. a lone master).
+#define BK_SPLIT_FLASH_PROBE_RETRY_MS 250
+#define BK_SPLIT_FLASH_PROBE_TIMEOUT_MS 15000
 
 typedef struct bk_split_flash_m2s_t {
     uint32_t seq;

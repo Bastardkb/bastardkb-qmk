@@ -1,17 +1,21 @@
 # Agent guidance (this repository)
 
-This is the `bastardkb-qmk` tree. **Read this file at the start of every task.** It encodes how we work
-together. Then read, in order:
+This is the `bastardkb-qmk` tree. It encodes how we work together, and the harness injects it into every
+session's context — **do not re-read it as a file.** Read, in order, only what the step needs:
 
-- `docs/superpowers/plans/*.md` — the plan (objective, architecture, ordered steps). This is the working
-  contract.
-- `docs/superpowers/qmk-knowledge-base.md` — our researched QMK findings. **Check it before researching**
-  anything about QMK/this repo; if you learn something new, add it there.
+- `docs/superpowers/plans/*.md` — first the plan's **status header**, then **the step you are implementing.**
+  The plan (objective, architecture, ordered steps) is the working contract; pull the full text only when
+  the header/step leaves a detail you actually need.
+- `docs/superpowers/qmk-knowledge-base.md` — our researched QMK findings, read **by section** (navigate the
+  headings to what the step references), not end to end. **Check it before researching** anything about
+  QMK/this repo; if you learn something new, add it there.
 
 ## How we approach work
 
-1. **Start fresh.** Read this file, then the relevant plan, then the knowledge base. Do not carry
-   assumptions from previous work that aren't written down.
+1. **Start fresh.** Read the plan's **status header** plus the step you're implementing, then the
+   knowledge-base sections that step references (this file is already in your context — don't re-read it).
+   Prefer running a whole plan in **one session** so already-read files stay in context; don't re-read files
+   you've already loaded this turn. Do not carry assumptions from previous work that aren't written down.
 2. **Keep it simple.** Do the minimum walkable deliverable for the step, nothing more. If something grows
    beyond the step's scope, stop and talk to the user.
 3. **One step at a time.** Implement ONE plan step, validate it on hardware, then **STOP**. Do not start the
