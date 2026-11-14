@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // Split-secondary flash clone: the master streams its own firmware image to the
@@ -22,6 +23,12 @@
 // 240/4).
 #define BK_SPLIT_FLASH_M2S_SIZE 240
 #define BK_SPLIT_FLASH_S2M_SIZE 4
+
+// The panel half must not bit-bang WS2812 data while it is receiving a clone.
+// Resume automatically if the stream stops without reaching COMMIT.
+#define BK_SPLIT_FLASH_RECEIVE_ACTIVITY_TIMEOUT_MS 1500u
+
+bool bk_split_flash_receiving(void);
 
 // Payload bytes per chunk: m2s minus the {seq, offset} words and the crc8 byte.
 #define BK_SPLIT_FLASH_CHUNK_DATA (BK_SPLIT_FLASH_M2S_SIZE - 2 * sizeof(uint32_t) - sizeof(uint8_t))

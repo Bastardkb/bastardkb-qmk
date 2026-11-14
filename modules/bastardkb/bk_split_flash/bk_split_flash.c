@@ -210,6 +210,8 @@ typedef struct {
 } bk_slave_stream_t;
 
 static bk_slave_stream_t bk_slave;
+static volatile bool     bk_receive_activity;
+static volatile uint32_t bk_last_receive_ms;
 
 // Staging preparation is requested by the master and performed by slave
 // housekeeping. These fields are shared with the split protocol thread; the
@@ -258,6 +260,9 @@ static bool bk_image_bootable(uint32_t image_len) {
 }
 
 static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, const void *initiator2target_buffer, uint8_t target2initiator_buffer_size, void *target2initiator_buffer) {
+    bk_receive_activity = true;
+    bk_last_receive_ms  = timer_read32();
+
     (void)initiator2target_buffer_size;
     (void)target2initiator_buffer_size;
 
@@ -393,6 +398,19 @@ static void bk_split_flash_slave_callback(uint8_t initiator2target_buffer_size, 
     }
     bk_slave.next_seq++;
     s2m->ack = m2s->seq;
+}
+
+bool bk_split_flash_receiving(void) {
+    if (!bk_receive_activity) {
+        return false;
+    }
+
+    if (timer_elapsed32(bk_last_receive_ms) >= BK_SPLIT_FLASH_RECEIVE_ACTIVITY_TIMEOUT_MS) {
+        bk_receive_activity = false;
+        return false;
+    }
+
+    return true;
 }
 
 // Registered on both halves at post-init. Reuses the RPC shmem buffers (a module
