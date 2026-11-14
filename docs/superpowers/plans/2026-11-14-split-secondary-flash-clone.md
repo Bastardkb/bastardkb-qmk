@@ -69,6 +69,14 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
 1. **Transport round-trip at the final chunk size.** Prove a single custom transaction carries a full-size
    chunk (m2s) and returns an ack (s2m) between the two halves, repeatedly. *This is the step the previous
    attempt died on* — it must pass before anything is built on top.
+   - **STATUS: DONE (2026-11-14).** Hardware PASS on `bastardkb/dilemma/4x6_4_procyon` (`-km vendor`): 26+
+     consecutive `BKCLONE: step=1 seq=<n> m2s_len=240 ack=<n> ok` round-trips, `ack == seq`, `seq`
+     incrementing. This UF2 is the **golden known-good**.
+   - Confirmed knobs: custom split transaction id `PUT_BK_SPLIT_FLASH` (module `bastardkb/bk_split_flash`),
+     registered on **both** halves at `keyboard_post_init`; m2s = 240 B, s2m = 4 B; lengths fixed in the
+     `split_transaction_table` entry; reuses the RPC shmem buffers (`RPC_M2S_BUFFER_SIZE 240`); driven from
+     the master's `housekeeping_task_bk_split_flash` every 500 ms via one `transport_execute_transaction`
+     (no RPC, no flash, no trigger).
 2. **Chunk streaming.** Master sends many chunks in sequence, advancing only when the slave acks the
    matching sequence number; the slave acks each. No flash yet.
 3. **Whole-image transfer into RAM.** Master streams the entire image; the slave holds it in a RAM buffer;
@@ -77,7 +85,11 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
    result is verified by read-back / CRC.
 5. **Commit + reboot.** Verify, then commit (erase active, copy, boot2 last), then reboot the secondary
    into the new image.
-6. **Trigger.** Wire the explicit trigger to start the whole flow.
+6. **Trigger.** Wire the trigger to start the whole flow.
+   - **OPEN (user request 2026-11-14):** the trigger should be **automatic** — the master copies to the
+     secondary right after the master itself is updated, with **no second bootmagic**. Mechanism (build-id
+     fingerprint vs. copy-on-every-boot) still to be decided; this supersedes the "explicit trigger" wording
+     once decided. Either way a deferred wait is needed for the ~3 s master→secondary boot skew.
 7. **Harden.** Retries, timeout/disconnect handling, erase/busy handling, minimal progress indication.
 
 ## Harness / test protocol

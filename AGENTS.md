@@ -18,6 +18,9 @@ together. Then read, in order:
    next step on your own.
 4. **One variable per step.** If something worked and then didn't, **bisect before adding anything** —
    never change two things (e.g. boot behaviour and the transport) in the same step.
+5. **Read the core call site, not just the header.** Before relying on any QMK API, hook, or init-time
+   ordering, read the exact place core invokes it (argument semantics, call order); a signature alone can
+   disagree with the real call. Record new findings in the knowledge base.
 
 ## Tooling discipline (always apply)
 
@@ -92,6 +95,10 @@ Before you declare a step done, review your own work:
   - what **PASS** and **FAIL** look like.
 - Do not finish with only code changes and no testable artefact + instructions. On the user's PASS, deliver
   a short retrospective (what went well / badly, a TLDR) and update the plan before the next step.
+- In the retrospective, for every "went badly" item, also state **WHY** it went badly (root cause, not just
+  the symptom), then **propose concrete edits to this file (`AGENTS.md`)** that would prevent or catch it
+  next time. Do not edit `AGENTS.md` on your own — present the proposed wording and apply it only after the
+  user approves.
 
 ## Process artefacts in this folder
 

@@ -123,6 +123,16 @@ plan/status belongs in the plan documents, not here.
   "disconnected" at `SPLIT_MAX_CONNECTION_ERRORS` (default 10, `split_util.c:46-47`).
 - Split sync is serviced from the main loop: `quantum/matrix_common.c:112` calls `transport_slave(...)` on
   the slave half. A blocking hook therefore also kills the split link.
+- **Slave callback argument quirk:** `serial_protocol.c` `react_to_transaction` passes the m2s size as the
+  *third* argument too — `transaction->slave_callback(initiator2target_buffer_size, in, initiator2target_buffer_size, out)`.
+  So a module callback must **not** trust the size arguments; use its own fixed sizes (compile-time struct sizes).
+- **Custom transaction proven at 240 B (hardware):** on the dilemma 4x6_4 procyon (230400 baud, vendor serial),
+  a single module transaction carrying a 240-byte m2s and a 4-byte s2m — registered on both halves via a
+  `split_transaction_table` entry reusing `rpc_m2s_buffer`/`rpc_s2m_buffer` (with `RPC_M2S_BUFFER_SIZE 240`) and
+  driven from master `housekeeping_task` every 500 ms with one `transport_execute_transaction` — round-trips
+  reliably and repeatedly (26+ consecutive). Register the table entry in `keyboard_post_init_<module>` (runs on
+  both halves; the slave thread starts in `split_post_init`, just before it — a probe in that tiny window fails
+  once and self-recovers via the thread's clear-on-error).
 
 ## Build-environment facts (observed in this workspace)
 
