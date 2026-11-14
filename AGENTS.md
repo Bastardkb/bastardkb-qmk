@@ -53,6 +53,14 @@ session's context — **do not re-read it as a file.** Read, in order, only what
 - **Prefer surgical edits over whole-file rewrites.** When a rewrite is unavoidable, record any non-obvious
   values you cannot diff (e.g. an API-version assert) from the knowledge base before you start.
 
+- **Verify module inclusion before handing off a firmware artefact.** A clean compile does not prove that the
+  intended community module was included. Confirm the module appears in the keymap's module list and in the
+  generated build/object output before treating the artefact as valid for hardware testing.
+- **Hash distinct artefacts before crossing-image validation.** When a test requires two different firmware
+  images, compare their final artefact hashes before handing them off. If the hashes are identical, stop and
+  resolve the build distinction instead of proceeding with a test that cannot exercise the differing-image
+  path.
+
 ## Ask the user — don't assume
 
 - **Don't hesitate to ask the user questions. Don't make assumptions about their intentions.**

@@ -22,7 +22,12 @@
   failed, or never reached the secondary), the master flashes **red** — RGB matrix mode `RGB_MATRIX_BREATHING`,
   speed 255, `HSV_RED`, brightness 150 — held until the mismatch is resolved. See step 7 for the exact
   arming rule (never on a successful commit/skip).
-- Last PASS: step 5, 2026-11-14 — golden `bk_split_flash_step5.uf2` (in `$QMK_USERSPACE`) is the known-good.
+- **PASS (user, 2026-11-14): adaptive probe validated on hardware.** Image A produced the immediate
+  `trigger=1` → transport → flash → `action=skip` path; Image B (a distinct 1 ms timeout variant used only
+  to force a different fingerprint) cloned onto the Image-A secondary with `action=commit`, rebooted the
+  secondary, and the keyboard remained usable. The normal 15-second Image A is the new baseline golden:
+  `bk_split_flash_probeA.uf2`.
+- Last PASS: adaptive-probe amendment, 2026-11-14 — golden `bk_split_flash_probeA.uf2` (in `$QMK_USERSPACE`).
 - Next blockers, in order: step 6 must resolve the staging-erase sizing (erase a fixed
   `BK_SPLIT_FLASH_STAGING_MAX`, or a deferred `prepare(length)` + slave-housekeeping erase + master poll)
   before validating a master image newer/larger than the secondary's; step 7's remaining LED states
@@ -306,10 +311,10 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
   distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
   repo root / userspace root no longer exists. Goldens live in `$QMK_USERSPACE`
-  (`/home/qlebastard/qmk_userspace_bstiq/`). Current golden: `bk_split_flash_step5.uf2` (step-5 hardware PASS,
-  2026-11-14). Earlier golden: `bk_split_flash_step4.uf2` (re-snapshotted there on 2026-11-14 from the step-4
-  build, since the earlier copy was missing). The probe amendment (AMENDED note above) built
-  `bk_split_flash_probe.uf2` — **compiled clean, NOT yet hardware-validated** (not a golden).
+  (`/home/qlebastard/qmk_userspace_bstiq/`). Current golden: `bk_split_flash_probeA.uf2` (adaptive-probe
+  hardware PASS, 2026-11-14). `bk_split_flash_probeB.uf2` was a temporary 15.001-second timeout variant used
+  only to force a distinct fingerprint for the commit test; it is not the baseline. Earlier goldens remain
+  `bk_split_flash_step5.uf2` and `bk_split_flash_step4.uf2`.
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)
