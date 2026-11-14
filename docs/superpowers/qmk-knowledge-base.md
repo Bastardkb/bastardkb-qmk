@@ -281,6 +281,10 @@ plan/status belongs in the plan documents, not here.
   module. The **whole-image CRC-32 is build-specific** — `via.c` embeds `QMK_BUILDDATE` (build date/time) in
   the image, so it changes on every rebuild; the runtime check is that the master/slave/readback CRCs match
   each other, not a fixed value.
+- **The commit runs the secondary's *currently running* firmware, not the image being written.** So any
+  side-effect added to the commit routine (e.g. erasing the EEPROM) only takes effect once the secondary
+  already runs a firmware that contains it. A first clone of a new firmware onto an old-firmware secondary
+  runs the OLD commit routine (no new side-effects); the feature applies from the next clone onward.
 - **Commit must run from housekeeping, not the callback:** an erase+copy takes seconds with IRQs off, so the
   COMMIT callback only records the request (and runs the O(1) bootability/read-back checks); the slave's
   `housekeeping_task` runs the RAM-resident commit after a short delay, long enough for the master to receive
@@ -319,3 +323,25 @@ plan/status belongs in the plan documents, not here.
 - `qmk_module.json` `features` (e.g. `"features": {"console": true}`) flow into the generated
   `community_rules.mk` via `generate_features_rules`, so a module can self-require a feature (console,
   deferred_exec, ...) without editing the keymap.
+
+## Module EEPROM datablocks
+
+- Declare in the module `config.h`: `#define EECONFIG_MODULE_<FOLDER>_DATA_SIZE <n>` (optional
+  `..._DATA_VERSION`, default = DATA_SIZE). Generator: `lib/python/qmk/cli/generate/community_modules.py`
+  `_render_eeconfig_declarations` (into generated `community_modules.h`, already included by modules) and
+  `_render_eeconfig_implementation` (into `community_modules.c`). Example: `modules/qmk/nvm_test`.
+- API: `eeconfig_read_<folder>_datablock(void *data, uint32_t off, uint32_t len)`,
+  `eeconfig_update_<folder>_datablock(const void *, off, len)`, `eeconfig_is_<folder>_datablock_valid()`,
+  weak `eeconfig_init_<folder>_datablock()` (default zero-fills + writes the version word). Storage =
+  4-byte version word + data.
+- Init order (`keyboard.c` `quantum_init`): `eeconfig_init()` if EEPROM not enabled (calls every module's init),
+  then `bootmagic()`, then `eeconfig_prepare_datablocks()` → re-inits any invalid module datablock. So by
+  `keyboard_post_init`/`housekeeping_task` a datablock is **always valid**; "fresh" shows up as zeroed data,
+  not as invalid. Detect "new" by comparing stored data against an expected value.
+- Wear-leveling region macros: `platforms/chibios/drivers/wear_leveling/wear_leveling_rp2040_flash_config.h`
+  (`WEAR_LEVELING_RP2040_FLASH_BASE` = `PICO_FLASH_SIZE_BYTES - WEAR_LEVELING_BACKING_SIZE`, backing 8192);
+  includable from a module as `"wear_leveling/wear_leveling_rp2040_flash_config.h"` (same path
+  `quantum/wear_leveling/wear_leveling_drivers.h` uses). Erasing that region with `flash_range_erase` makes the
+  next boot see an un-enabled EEPROM → full `eeconfig_init()`.
+- Unverified: whether an RP2040 UF2 drag-and-drop erases the EEPROM region (bootrom likely only erases sectors
+  the UF2 covers). Don't rely on it either way.

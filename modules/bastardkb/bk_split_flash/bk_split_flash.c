@@ -13,6 +13,7 @@
 #include "hardware/sync.h"
 #include "hardware/regs/addressmap.h"
 #include "hardware/regs/m0plus.h"
+#include "wear_leveling/wear_leveling_rp2040_flash_config.h"
 
 #include "bk_split_flash.h"
 
@@ -31,7 +32,9 @@ STATIC_ASSERT(sizeof(bk_split_flash_m2s_t) == BK_SPLIT_FLASH_M2S_SIZE, "m2s chun
 STATIC_ASSERT(sizeof(bk_split_flash_s2m_t) == BK_SPLIT_FLASH_S2M_SIZE, "s2m ack size mismatch");
 // Keep the staging slot clear of the wear-leveling EEPROM region (base 0x1FE000
 // on this board; see the knowledge base's flash-size facts).
-STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET + BK_SPLIT_FLASH_STAGING_MAX <= 0x1FE000u, "staging overlaps the wear-leveling EEPROM");
+STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET + BK_SPLIT_FLASH_STAGING_MAX <= WEAR_LEVELING_RP2040_FLASH_BASE, "staging overlaps the wear-leveling EEPROM");
+// The commit erases the whole wear-leveling region, so it must be sector-aligned.
+STATIC_ASSERT((WEAR_LEVELING_RP2040_FLASH_BASE % FLASH_SECTOR_SIZE) == 0 && (WEAR_LEVELING_BACKING_SIZE % FLASH_SECTOR_SIZE) == 0, "wear-leveling region not sector-aligned");
 // BEGIN rejects an image larger than the erased staging slot, so the active
 // region a commit erases is at most STAGING_MAX and can never reach staging.
 STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET >= BK_SPLIT_FLASH_STAGING_MAX, "active region could overlap staging");
@@ -371,7 +374,8 @@ typedef void (*bk_flash_program_fn_t)(uint32_t flash_offs, const uint8_t *data, 
 static bk_flash_erase_fn_t volatile   bk_flash_erase   = flash_range_erase;
 static bk_flash_program_fn_t volatile bk_flash_program = flash_range_program;
 
-// Erase the active region, copy staging over it, then reset. Runs with interrupts
+// Erase the active region and the wear-leveling EEPROM, copy staging over the
+// active region, then reset. Runs with interrupts
 // off and every instruction and byte of state in RAM: VTOR points at flash sector
 // 0, which is erased here, so nothing may be fetched from the active region until
 // after the reset. boot2 (page 0) is programmed last, so the image only becomes
@@ -384,6 +388,11 @@ static void __no_inline_not_in_flash_func(bk_split_flash_commit)(void) {
     (void)save_and_disable_interrupts();
 
     bk_flash_erase(0, erase_len);
+
+    // Reset the secondary's EEPROM like a fresh flash: erase the whole
+    // wear-leveling region, so the new image boots with eeconfig re-initialised
+    // (done before the copy, so once the image is bootable its EEPROM is clean).
+    bk_flash_erase(WEAR_LEVELING_RP2040_FLASH_BASE, WEAR_LEVELING_BACKING_SIZE);
 
     for (uint32_t page = 1; page < pages; page++) {
         const volatile uint8_t *src = (const volatile uint8_t *)(XIP_BASE + BK_SPLIT_FLASH_STAGING_OFFSET + page * FLASH_PAGE_SIZE);
@@ -432,7 +441,7 @@ typedef enum {
 } bk_stream_phase_t;
 
 static bk_stream_phase_t bk_phase;
-static uint32_t          bk_run_at_ms;   // absolute time of the next run start
+static uint32_t          bk_run_at_ms;   // absolute time of the first run start
 static bool              bk_scheduled;
 static uint32_t          bk_image_len;
 static uint32_t          bk_image_boot2; // boot2 checksum of this image (step-4 marker)
@@ -440,11 +449,54 @@ static uint32_t          bk_chunk_count;
 static uint32_t          bk_next_seq;
 static uint32_t          bk_sent_crc;    // running CRC-32 of the bytes sent so far
 
-// Step-4 validation one-shot: commit once even when the staged image equals the
-// active image (both halves run the same UF2). Consumed by the first commit
-// attempt; afterwards the re-clone guard decides. Step 5 replaces the
-// first-run condition with the Bootmagic trigger.
-static bool bk_force_commit = true;
+// Step-5 trigger: the master clones its image to the secondary once, when it
+// detects a new firmware was flashed to it. The fingerprint (whole-image CRC-32)
+// is persisted in the module's EEPROM datablock; a mismatch means "new
+// firmware". Outside the trigger
+// no stream runs and no re-flash happens.
+static bool     bk_triggered; // new firmware detected at boot
+static bool     bk_done;      // clone attempt finished (success or failure)
+static uint32_t bk_image_crc; // fingerprint of this image
+
+// Whole-image CRC-32, used as the firmware fingerprint. QMK embeds the build
+// date/time in the image, so this changes on every rebuild and reliably
+// distinguishes a newly-flashed firmware from the one already recorded.
+static uint32_t bk_image_crc_compute(void) {
+    uint32_t len = (uint32_t)(__flash_binary_end - __flash_binary_start);
+    return bk_crc32_finalize(bk_crc32_update(0xFFFFFFFFu, __flash_binary_start, len));
+}
+
+// Detect a new firmware: compare the persisted fingerprint with this image's.
+// Whether or not a reflash erases the EEPROM region, a new image has a new CRC
+// (and a fresh datablock is zeroed by eeconfig init), so either way a mismatch
+// means the master was just updated.
+static bool bk_trigger_detect(void) {
+    bk_image_crc = bk_image_crc_compute();
+    uint32_t stored = 0;
+    eeconfig_read_bk_split_flash_datablock(&stored, 0, sizeof(stored));
+    return stored != bk_image_crc;
+}
+
+// Persist the fingerprint after a successful clone, so the next boot does not
+// re-trigger. Deliberately not called on failure, so a failed clone re-triggers
+// on the next boot.
+static void bk_trigger_persist(void) {
+    eeconfig_update_bk_split_flash_datablock(&bk_image_crc, 0, sizeof(bk_image_crc));
+}
+
+static void bk_trigger_marker(bool triggered) {
+    if (triggered) {
+        xprintf("BKCLONE: step=5 trigger=1 crc=0x%08X ok\n", (unsigned)bk_image_crc);
+    } else {
+        xprintf("BKCLONE: step=5 trigger=0 ok\n");
+    }
+}
+
+// Terminal state of the one-shot stream: stop and never re-run.
+static void bk_stream_finish(void) {
+    bk_phase = BK_STREAM_IDLE;
+    bk_done  = true;
+}
 
 // Three distinct markers per run. `transport` covers the link (the slave's
 // rolling CRC-32 of the bytes it received vs. the master's CRC-32 of the bytes it
@@ -490,11 +542,10 @@ static void bk_stream_start(void) {
     bk_chunk_count = (bk_image_len + BK_SPLIT_FLASH_CHUNK_DATA - 1) / BK_SPLIT_FLASH_CHUNK_DATA;
     bk_next_seq    = 1;
     bk_sent_crc    = 0xFFFFFFFFu;
-    bk_run_at_ms   = timer_read32() + BK_SPLIT_FLASH_RUN_PERIOD_MS;
 
     if (bk_image_len == 0) {
         bk_flash_marker(false, "empty", 0);
-        bk_phase = BK_STREAM_IDLE;
+        bk_stream_finish();
     } else {
         bk_phase = BK_STREAM_BEGIN;
     }
@@ -514,13 +565,13 @@ static void bk_stream_step(void) {
                 bk_phase = BK_STREAM_DATA;
             } else if (!ok) {
                 bk_transport_marker(false, "begin-tx", 0);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_LEN_ERR) {
                 bk_flash_marker(false, "len", 0);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
             } else {
                 bk_transport_marker(false, "begin-ack", s2m.ack);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
             }
             break;
         }
@@ -551,7 +602,7 @@ static void bk_stream_step(void) {
 
             if (reason != NULL) {
                 bk_transport_marker(false, reason, s2m.ack);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
                 break;
             }
 
@@ -573,7 +624,7 @@ static void bk_stream_step(void) {
                 bk_phase = BK_STREAM_VERIFY;
             } else {
                 bk_transport_marker(false, ok ? "crc" : "tx", slave_crc);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
             }
             break;
         }
@@ -589,25 +640,22 @@ static void bk_stream_step(void) {
                 bk_phase = BK_STREAM_COMMIT;
             } else {
                 bk_flash_marker(false, ok ? "crc" : "tx", readback);
-                bk_phase = BK_STREAM_IDLE;
+                bk_stream_finish();
             }
             break;
         }
 
         case BK_STREAM_COMMIT: {
             m2s.seq = BK_SPLIT_FLASH_SEQ_COMMIT;
-            if (bk_force_commit) {
-                m2s.offset = 1; // force one commit even if staged == active
-            }
 
             bool ok = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
             if (!ok) {
                 bk_commit_marker(false, NULL, "tx");
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_COMMIT) {
-                bk_force_commit = false;
+                bk_trigger_persist();
                 bk_commit_marker(true, "commit", NULL);
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_MATCH) {
-                bk_force_commit = false;
+                bk_trigger_persist();
                 bk_commit_marker(true, "skip", NULL);
             } else if (s2m.ack == BK_SPLIT_FLASH_ACK_BOOT_ERR) {
                 bk_commit_marker(false, NULL, "boot");
@@ -617,10 +665,7 @@ static void bk_stream_step(void) {
                 bk_commit_marker(false, NULL, "ack");
             }
 
-            // On a commit the secondary is about to erase and reset: do not
-            // transact again until the next period, so it has time to reappear.
-            bk_run_at_ms = timer_read32() + BK_SPLIT_FLASH_RUN_PERIOD_MS;
-            bk_phase     = BK_STREAM_IDLE;
+            bk_stream_finish();
             break;
         }
 
@@ -649,14 +694,25 @@ void housekeeping_task_bk_split_flash(void) {
 
     if (!bk_scheduled) {
         bk_scheduled = true;
+        bk_triggered = bk_trigger_detect();
         bk_run_at_ms = timer_read32() + BK_SPLIT_FLASH_FIRST_RUN_DELAY_MS;
+    }
+
+    if (bk_done) {
+        return;
     }
 
     if (bk_phase == BK_STREAM_IDLE) {
         if ((int32_t)(timer_read32() - bk_run_at_ms) < 0) {
             return;
         }
-        bk_stream_start();
+        bk_trigger_marker(bk_triggered);
+        if (bk_triggered) {
+            bk_stream_start();
+        } else {
+            bk_done = true;
+        }
+        return;
     }
 
     bk_stream_step();

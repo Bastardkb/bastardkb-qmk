@@ -6,17 +6,16 @@
 // Split-secondary flash clone: the master streams its own firmware image to the
 // secondary over the split link, one fixed-size transaction per chunk.
 //
-// Step 4: on top of step 3 (write the stream to staging and verify the read-back
-// CRC), the secondary also proves the staged image is *bootable* (RP2040 boot2
-// checksum + vector-table plausibility) and then commits it: one interrupts-off,
-// RAM-resident routine erases the active region, copies staging over it (boot2
-// last) and resets into the new image.
-//
-// The commit is skipped when the staged image already matches the secondary's
-// active image, so the 20 s cadence does not reboot the secondary forever. For
-// this validation step the master forces exactly one commit on its first run
-// after boot (the images are identical when both halves run the same UF2); step 5
-// replaces that with a Bootmagic-gated trigger.
+// Step 5: the whole flow is gated by an automatic trigger. On boot the master
+// compares its own firmware fingerprint (whole-image CRC-32) against the value
+// persisted in its module EEPROM datablock; a mismatch (new image, or a fresh
+// zeroed datablock) means a new firmware was just written. Only then
+// does the master stream its image to the secondary, which verifies it (boot2
+// checksum + vector-table plausibility + read-back CRC) and commits it (erase
+// active and the wear-leveling EEPROM, copy staging, boot2 last, reset), so the
+// secondary boots the new image with a fresh EEPROM. Outside the trigger no stream runs
+// and no re-flash happens. The re-clone guard still skips the commit when the
+// staged image already matches the secondary's active image.
 //
 // The split protocol takes the byte counts from the transaction table, not the
 // wire, so the sizes are fixed at compile time (unchanged from step 1's proven
@@ -58,10 +57,10 @@
 #define BK_SPLIT_FLASH_STAGING_OFFSET 0x100000u
 #define BK_SPLIT_FLASH_STAGING_MAX 0x40000u
 
-// Master run schedule: first run after boot, then one run every period. The first
-// delay clears the ~3 s the two halves' boot times differ by on this board.
+// Master run schedule: a single run, delayed to clear the ~3 s the two halves'
+// boot times differ by on this board. The clone is one-shot (gated by the
+// trigger), so there is no periodic re-run.
 #define BK_SPLIT_FLASH_FIRST_RUN_DELAY_MS 5000
-#define BK_SPLIT_FLASH_RUN_PERIOD_MS 20000
 
 typedef struct bk_split_flash_m2s_t {
     uint32_t seq;

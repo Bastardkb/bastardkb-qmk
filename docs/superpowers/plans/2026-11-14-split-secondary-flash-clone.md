@@ -17,8 +17,8 @@ behaviour changes.**
 
 ## Non-goals (explicitly out of MVP scope)
 
-- No automatic fingerprint / handshake / version negotiation — the trigger is explicit (Bootmagic on the
-  master, decided for work step 5).
+- No automatic fingerprint / handshake / version negotiation with the secondary — the trigger is the master's
+  own "new firmware" detection (EEPROM-persisted fingerprint, decided for work step 5).
 - No transferring a foreign image (only the master's own image).
 - No progress UI beyond a minimal indicator (the LED indicator defined in work step 7).
 - No EEPROM / handedness semantics changes.
@@ -63,10 +63,10 @@ behaviour changes.**
 
 ### The trigger
 
-- **Bootmagic on the master (user decision, 2026-11-14; implemented in step 5).** A key held at master boot
-  starts the clone and forces the commit. **Never** a boot-time auto-detect. Mind the dilemma Bootmagic L00
-  caveat in the knowledge base (L00 already enters BOOTSEL), so the trigger must use a non-conflicting key or
-  run after Bootmagic handling.
+- **Automatic on new master firmware (user decision, 2026-11-14; implemented in step 5; supersedes the earlier
+  Bootmagic decision).** The master compares its own image fingerprint with the one persisted in its module
+  EEPROM datablock; a mismatch starts one clone. No probing of the secondary at boot — the decision is purely
+  local to the master.
 
 ## Ordered work steps (riskiest / most important first)
 
@@ -162,7 +162,31 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
      known-good**. (The whole-image CRC is build-specific because `QMK_BUILDDATE` is embedded; the check is
      that master/slave/readback agree.)
 5. **Trigger.** Wire the trigger to start the whole flow.
-   - **DECIDED (user, 2026-11-14): Bootmagic on the master.** A key held at master boot starts the clone and
+   - **SUPERSEDED (user, 2026-11-14): automatic "new firmware on master" detection, not Bootmagic.** The
+     earlier Bootmagic-key decision below is replaced: whenever a new firmware is written to the master, the
+     master clones it to the secondary on its next boot, with no separate key/mechanism.
+   - **Implemented knobs:** the module declares a 4-byte EEPROM datablock
+     (`EECONFIG_MODULE_BK_SPLIT_FLASH_DATA_SIZE 4`) holding the master's fingerprint = whole-image CRC-32 of
+     `[XIP_BASE, __flash_binary_end)` (build-specific, since `QMK_BUILDDATE` is embedded). On the master's first
+     `housekeeping_task` it compares the stored fingerprint with its own; mismatch (new image, or a fresh zeroed
+     datablock) ⇒ trigger. After the 5 s boot-skew delay it prints exactly one `BKCLONE: step=5 trigger=1|0`
+     marker; only `trigger=1` runs the stream, **once** (no 20 s cadence; `BK_SPLIT_FLASH_RUN_PERIOD_MS`
+     removed). The step-4 commit force is removed: the re-clone guard decides (new image ⇒ `commit`, identical ⇒
+     `skip`). The fingerprint is persisted only on a `commit`/`skip` verdict, so a failed clone re-triggers on
+     the next boot.
+   - **Secondary EEPROM reset (user, 2026-11-14):** the commit also erases the secondary's whole wear-leveling
+     EEPROM region (`WEAR_LEVELING_RP2040_FLASH_BASE`, `WEAR_LEVELING_BACKING_SIZE` = 0x1FE000, 8 KiB) inside the
+     RAM-resident commit, right after erasing the active region and before the copy, so the cloned secondary
+     boots like a freshly flashed half (eeconfig re-initialised).
+   - **Bootstrap caveat:** the commit is executed by the secondary's *currently running* firmware, so the EEPROM
+     wipe only takes effect once the secondary already runs a build that contains it. A first clone onto an
+     old-firmware secondary runs the old commit (no wipe). Validated by cloning between two builds of the same
+     step-5 source (differ only in build timestamp ⇒ different CRC): secondary runs build A (erase-capable),
+     master runs build B ⇒ `action=commit` and the wipe runs.
+   - **Staging-size note:** step-5 image is 94096 B (408 chunks); a step-4 secondary erased
+     `round_up(93692, 4096)` = 94208 B,
+     so cloning step-5 onto a step-4 secondary fits by luck of sector rounding. The general fix remains step 6.
+   - (Original, superseded) **DECIDED (user, 2026-11-14): Bootmagic on the master.** A key held at master boot starts the clone and
      **auto-forces** the commit (replacing step 4's "first run after boot" force). The 20 s cadence and the
      unconditional first-run force exist only for step-4 validation; here they are gated by the trigger, so
      outside it no re-flash happens. Open detail: L00 already enters BOOTSEL on this board (KB), so choose a
@@ -208,7 +232,10 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   `qmk compile` copies its output over `<QMK_HOME>/<name>.uf2` **and** `<QMK_USERSPACE>/<name>.uf2`, so an
   earlier golden kept at either of those paths is overwritten by the next build — save goldens under a
   distinct filename (e.g. `bk_split_flash_step<N>.uf2`); that is also why the Step 1 golden copy at the
-  repo root / userspace root no longer exists. Current golden: `bk_split_flash_step4.uf2`.
+  repo root / userspace root no longer exists. Goldens live in `$QMK_USERSPACE`
+  (`/home/qlebastard/qmk_userspace_bstiq/`). Current golden: `bk_split_flash_step4.uf2` (re-snapshotted there
+  on 2026-11-14 from the step-4 build, since the earlier copy was missing); step-5 candidate:
+  `bk_split_flash_step5.uf2`.
 - If a step regresses an earlier one, **bisect before adding anything** (see `AGENTS.md`).
 
 ## Dead-ends (do not repeat)
@@ -222,3 +249,4 @@ Each step = **one build, one hardware assertion**, keyboard stays usable. Track 
   path; use an explicit trigger.
 - **Changing boot behaviour and the transport in the same step.** The previous failure bundled a payload
   change, a CRC, a policy, and boot-time behaviour — impossible to bisect.
+ct.
