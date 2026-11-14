@@ -42,6 +42,7 @@ STATIC_ASSERT((WEAR_LEVELING_RP2040_FLASH_BASE % FLASH_SECTOR_SIZE) == 0 && (WEA
 // BEGIN rejects an image larger than the erased staging slot, so the active
 // region a commit erases is at most STAGING_MAX and can never reach staging.
 STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET >= BK_SPLIT_FLASH_STAGING_MAX, "active region could overlap staging");
+STATIC_ASSERT(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET + FLASH_SECTOR_SIZE <= WEAR_LEVELING_RP2040_FLASH_BASE, "clone marker overlaps the wear-leveling EEPROM");
 
 // Reflected CRC-32 (poly 0xEDB88320, init 0xFFFFFFFF, xorout 0xFFFFFFFF). QMK's
 // quantum/crc.c only offers a whole-buffer CRC-8, so both halves use this table
@@ -114,6 +115,19 @@ static uint32_t bk_crc32_update_reversed(uint32_t crc, const uint8_t *data, uint
     return crc;
 }
 
+static bool bk_clone_marker_matches(uint32_t image_len, uint32_t image_crc);
+static uint32_t bk_image_crc_compute(void);
+
+static bool bk_clone_marker_matches(uint32_t image_len, uint32_t image_crc) {
+    const uint8_t *marker = (const uint8_t *)(XIP_BASE + BK_SPLIT_FLASH_CLONE_MARKER_OFFSET);
+    uint32_t magic        = bk_read_u32(marker);
+    uint32_t marker_len   = bk_read_u32(marker + 4u);
+    uint32_t marker_crc   = bk_read_u32(marker + 8u);
+    uint32_t marker_check = bk_read_u32(marker + 12u);
+
+    return magic == BK_SPLIT_FLASH_CLONE_MARKER_MAGIC && marker_len == image_len && marker_crc == image_crc && marker_check == ~image_crc;
+}
+
 // The RP2040 bootrom checksum for a boot2 blob (the first 256 bytes of an image):
 // the bit-reversed raw CRC-32 over the first 252 bytes, compared against the
 // little-endian word at offset 252.
@@ -133,6 +147,7 @@ static uint32_t bk_page_len;
 static uint32_t bk_staged;
 static uint32_t bk_readback_crc; // running CRC-32 of the bytes read back from staging
 static uint32_t bk_active_crc;   // running CRC-32 of the bytes currently in the active region
+static bool     bk_secondary_marker_checked;
 
 // Program one 256-byte page, then read it back and fold its `valid_len` data
 // bytes into the read-back CRC. Verifying a page at a time (rather than reading
@@ -421,6 +436,39 @@ typedef void (*bk_flash_program_fn_t)(uint32_t flash_offs, const uint8_t *data, 
 static bk_flash_erase_fn_t volatile   bk_flash_erase   = flash_range_erase;
 static bk_flash_program_fn_t volatile bk_flash_program = flash_range_program;
 
+// Old secondary firmware cannot write the marker during its commit. Once the
+// new image boots, recognize the copied staging image and record provenance.
+static void bk_secondary_marker_task(void) {
+    if (bk_secondary_marker_checked || bk_slave.active || bk_commit_pending || bk_staging_prepare_pending || bk_staging_prepare_busy) {
+        return;
+    }
+    bk_secondary_marker_checked = true;
+
+    uint32_t image_len = (uint32_t)(__flash_binary_end - __flash_binary_start);
+    uint32_t active_crc = bk_image_crc_compute();
+    uint32_t staging_crc = bk_crc32_update(0xFFFFFFFFu, (const uint8_t *)(XIP_BASE + BK_SPLIT_FLASH_STAGING_OFFSET), image_len);
+    if (bk_clone_marker_matches(image_len, active_crc) || bk_crc32_finalize(staging_crc) != active_crc) {
+        return;
+    }
+
+    uint32_t ints = save_and_disable_interrupts();
+    bk_flash_erase(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET, FLASH_SECTOR_SIZE);
+    for (uint32_t i = 0; i < FLASH_PAGE_SIZE; i++) {
+        bk_page[i] = 0xFFu;
+    }
+    bk_page[0] = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC);
+    bk_page[1] = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 8);
+    bk_page[2] = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 16);
+    bk_page[3] = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 24);
+    for (uint8_t i = 0; i < 4; i++) {
+        bk_page[4 + i] = (uint8_t)(image_len >> (8 * i));
+        bk_page[8 + i] = (uint8_t)(active_crc >> (8 * i));
+        bk_page[12 + i] = (uint8_t)((~active_crc) >> (8 * i));
+    }
+    bk_flash_program(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET, bk_page, FLASH_PAGE_SIZE);
+    restore_interrupts(ints);
+}
+
 // Erase the active region and the wear-leveling EEPROM, copy staging over the
 // active region, then reset. Runs with interrupts
 // off and every instruction and byte of state in RAM: VTOR points at flash sector
@@ -458,6 +506,32 @@ static void __no_inline_not_in_flash_func(bk_split_flash_commit)(void) {
         }
         bk_flash_program(0, bk_page, FLASH_PAGE_SIZE);
     }
+
+    // Record provenance only after the new active image is fully programmed.
+    // The marker is outside the image slot and survives the EEPROM wipe above.
+    bk_flash_erase(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET, FLASH_SECTOR_SIZE);
+    for (uint32_t i = 0; i < FLASH_PAGE_SIZE; i++) {
+        bk_page[i] = 0xFFu;
+    }
+    bk_page[0]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC);
+    bk_page[1]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 8);
+    bk_page[2]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 16);
+    bk_page[3]  = (uint8_t)(BK_SPLIT_FLASH_CLONE_MARKER_MAGIC >> 24);
+    bk_page[4]  = (uint8_t)(image_len);
+    bk_page[5]  = (uint8_t)(image_len >> 8);
+    bk_page[6]  = (uint8_t)(image_len >> 16);
+    bk_page[7]  = (uint8_t)(image_len >> 24);
+    uint32_t image_crc = bk_crc32_finalize(bk_readback_crc);
+    bk_page[8]  = (uint8_t)(image_crc);
+    bk_page[9]  = (uint8_t)(image_crc >> 8);
+    bk_page[10] = (uint8_t)(image_crc >> 16);
+    bk_page[11] = (uint8_t)(image_crc >> 24);
+    uint32_t image_crc_check = ~image_crc;
+    bk_page[12] = (uint8_t)(image_crc_check);
+    bk_page[13] = (uint8_t)(image_crc_check >> 8);
+    bk_page[14] = (uint8_t)(image_crc_check >> 16);
+    bk_page[15] = (uint8_t)(image_crc_check >> 24);
+    bk_flash_program(BK_SPLIT_FLASH_CLONE_MARKER_OFFSET, bk_page, FLASH_PAGE_SIZE);
 
     // Clean system reset; the new vector table is only used after the reset.
     __asm__ volatile("dsb 0xf" ::: "memory");
@@ -597,6 +671,10 @@ static uint32_t bk_image_crc_compute(void) {
 // means the master was just updated.
 static bool bk_trigger_detect(void) {
     bk_image_crc = bk_image_crc_compute();
+    uint32_t image_len = (uint32_t)(__flash_binary_end - __flash_binary_start);
+    if (bk_clone_marker_matches(image_len, bk_image_crc)) {
+        return false;
+    }
     uint32_t stored = 0;
     eeconfig_read_bk_split_flash_datablock(&stored, 0, sizeof(stored));
     return stored != bk_image_crc;
@@ -871,6 +949,7 @@ void housekeeping_task_bk_split_flash(void) {
     bk_indicator_task();
 
     if (!is_keyboard_master()) {
+        bk_secondary_marker_task();
         bk_split_flash_prepare_staging();
 
         // The commit was requested from the split thread. Give the master time to

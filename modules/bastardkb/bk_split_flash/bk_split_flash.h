@@ -62,6 +62,12 @@
 #define BK_SPLIT_FLASH_STAGING_OFFSET 0x100000u
 #define BK_SPLIT_FLASH_STAGING_MAX 0x40000u
 
+// A successful secondary commit leaves a small provenance marker outside the
+// image slot. This survives the secondary EEPROM reset and prevents that side
+// from looking like a newly flashed master if USB is later moved to it.
+#define BK_SPLIT_FLASH_CLONE_MARKER_OFFSET (BK_SPLIT_FLASH_STAGING_OFFSET + BK_SPLIT_FLASH_STAGING_MAX)
+#define BK_SPLIT_FLASH_CLONE_MARKER_MAGIC 0x424B434Cu // "BKCL"
+
 // Master run cadence: the clone is one-shot (gated by the trigger), so there is
 // no periodic re-run. Instead of a fixed delay to clear the ~3 s master/secondary
 // boot skew, the master uses the BEGIN transaction itself as a readiness probe:
