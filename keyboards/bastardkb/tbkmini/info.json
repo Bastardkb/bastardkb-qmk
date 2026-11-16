@@ -8,7 +8,7 @@
     },
     "rgb_matrix": {
         "driver": "ws2812",
-        "max_brightness": 50,
+        "max_brightness": 176,
         "sleep": true,
         "split_count": [21, 21],
         "animations": {
