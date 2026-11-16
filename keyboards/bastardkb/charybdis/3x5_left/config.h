@@ -54,3 +54,6 @@
 #define ROTATIONAL_TRANSFORM_ANGLE 30
 
 #undef MASTER_RIGHT
+
+/* 4MB memory (not default) */
+#define EXTERNAL_FLASH_SIZE (4 * 1024 * 1024)

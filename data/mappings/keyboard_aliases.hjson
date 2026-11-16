@@ -69,79 +69,79 @@
         "target": "kkatano/bakeneko80"
     },
     "bastardkb/charybdis/3x5/v2/elitec": {
-        "target": "bastardkb/charybdis/3x5/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x5/elitec"
     },
     "bastardkb/charybdis/3x5/v2/splinky_2": {
-        "target": "bastardkb/charybdis/3x5/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x5/elitec"
     },
     "bastardkb/charybdis/3x5/v2/splinky_3": {
-        "target": "bastardkb/charybdis/3x5/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x5/elitec"
     },
     "bastardkb/charybdis/3x5/v2/stemcell": {
-        "target": "bastardkb/charybdis/3x5/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x5/elitec"
     },
     "bastardkb/charybdis/3x6/v2/elitec": {
-        "target": "bastardkb/charybdis/3x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x6/elitec"
     },
     "bastardkb/charybdis/3x6/v2/splinky_2": {
-        "target": "bastardkb/charybdis/3x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x6/elitec"
     },
     "bastardkb/charybdis/3x6/v2/splinky_3": {
-        "target": "bastardkb/charybdis/3x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x6/elitec"
     },
     "bastardkb/charybdis/3x6/v2/stemcell": {
-        "target": "bastardkb/charybdis/3x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/3x6/elitec"
     },
     "bastardkb/charybdis/4x6/v2/elitec": {
-        "target": "bastardkb/charybdis/4x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/4x6/elitec"
     },
     "bastardkb/charybdis/4x6/v2/splinky_2": {
-        "target": "bastardkb/charybdis/4x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/4x6/elitec"
     },
     "bastardkb/charybdis/4x6/v2/splinky_3": {
-        "target": "bastardkb/charybdis/4x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/4x6/elitec"
     },
     "bastardkb/charybdis/4x6/v2/stemcell": {
-        "target": "bastardkb/charybdis/4x6/splinktegrated_rev1"
+        "target": "bastardkb/charybdis/4x6/elitec"
     },
     "bastardkb/dilemma/3x5_2/splinky": {
-        "target": "bastardkb/dilemma/3x5_2"
+        "target": "bastardkb/dilemma/3x5_2/promicro"
     },
     "bastardkb/scylla/v2/elitec": {
-        "target": "bastardkb/scylla/splinktegrated_rev1"
+        "target": "bastardkb/scylla/promicro"
     },
     "bastardkb/scylla/v2/splinky_2": {
-        "target": "bastardkb/scylla/splinktegrated_rev1"
+        "target": "bastardkb/scylla/promicro"
     },
     "bastardkb/scylla/v2/splinky_3": {
-        "target": "bastardkb/scylla/splinktegrated_rev1"
+        "target": "bastardkb/scylla/promicro"
     },
     "bastardkb/scylla/v2/stemcell": {
-        "target": "bastardkb/scylla/splinktegrated_rev1"
+        "target": "bastardkb/scylla/promicro"
     },
     "bastardkb/skeletyl/v2/elitec": {
-        "target": "bastardkb/skeletyl/splinktegrated_rev1"
+        "target": "bastardkb/skeletyl/promicro"
     },
     "bastardkb/skeletyl/v2/splinky_2": {
-        "target": "bastardkb/skeletyl/splinktegrated_rev1"
+        "target": "bastardkb/skeletyl/promicro"
     },
     "bastardkb/skeletyl/v2/splinky_3": {
-        "target": "bastardkb/skeletyl/splinktegrated_rev1"
+        "target": "bastardkb/skeletyl/promicro"
     },
     "bastardkb/skeletyl/v2/stemcell": {
-        "target": "bastardkb/skeletyl/splinktegrated_rev1"
+        "target": "bastardkb/skeletyl/promicro"
     },
     "bastardkb/tbkmini/v2/elitec": {
-        "target": "bastardkb/tbkmini/splinktegrated_rev1"
+        "target": "bastardkb/tbkmini/promicro"
     },
     "bastardkb/tbkmini/v2/splinky_2": {
-        "target": "bastardkb/tbkmini/splinktegrated_rev1"
+        "target": "bastardkb/tbkmini/promicro"
     },
     "bastardkb/tbkmini/v2/splinky_3": {
-        "target": "bastardkb/tbkmini/splinktegrated_rev1"
+        "target": "bastardkb/tbkmini/promicro"
     },
     "bastardkb/tbkmini/v2/stemcell": {
-        "target": "bastardkb/tbkmini/splinktegrated_rev1"
+        "target": "bastardkb/tbkmini/promicro"
     },
     "bear_face": {
         "target": "bear_face/v1"
@@ -1744,7 +1744,10 @@
         "target": "ducky/one2mini/1861st"
     },
     "ducky/one2sf": {
-        "target": "ducky/one2sf/1967st"
+        "target": "ducky/one2sf/1967st/ansi"
+    },
+    "ducky/one2sf/1967st": {
+        "target": "ducky/one2sf/1967st/ansi"
     },
     "dumbpad": {
         "target": "dumbpad/v0x"
@@ -2385,5 +2388,8 @@
     },
     "sirius/uni660/rev2": {
         "target": "sirius/uni660/rev2/ansi"
+    },
+    "mechlovin/infinity875": {
+        "target": "mechlovin/infinity875/rev1"
     }
 }

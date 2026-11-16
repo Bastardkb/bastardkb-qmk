@@ -55,10 +55,17 @@ If a host does not support USB trackpads (such as Mac-OS, or some KVMs) the Micr
 | `DIGITIZER_MOTION_PIN`                         | (Optional) If supported, will only read from sensor if pin is active.                                                            | _not defined_ |
 | `DIGITIZER_MOTION_PIN_ACTIVE_LOW`              | (Optional) If defined then the motion pin is active-low.                                                                         | _varies_      |
 | `DIGITIZER_REPORT_TAPS_AS_CLICKS`              | (Optional) If defined then tap gestures from mouse fallback will also be reported in the digitizer report.                       | `False`       |
+| `DIGITIZER_REPORT_FINGER_PRESSURE`             | (Optional) If defined and supported by the driver, pressure data will be reported with each finger.                              | `False`       |
+| `DIGITIZER_REPORT_FINGER_SIZE`                 | (Optional) If defined and supported by the driver, size data will be reported with each finger.                                  | `False`       |
+
 
 The option `DIGITIZER_REPORT_TAPS_AS_CLICKS` is provided as most hosts do not provide per device configuration for trackpads. If you would like tap to click enabled on your QMK trackpad, but not on your laptops integrated trackpad, you can enable this.
 
 By default when reporting to the host, only the first `DIGITIZER_FINGER_COUNT` contacts will be considered, but additional contacts may be used by firmware to trigger custom behaviours (such as custom gestures).
+
+## Pressure/Size reporting
+
+Finger pressure or size information can optionally be reported with each finger. This can improve lift-off detection, but for pressure reporting calibration is required. Typically - unless pressure sensing hardware is available, touch controllers use the capacitive signal amplitude to approximate pressure reporting. Usually there will be a mechanism for fine tuning the reported values. On Linux `libinput` provides some useful debug tools for calibrating pressure values - you should be able to compare reports to another device (such as a laptop trackpad), to ensure they are roughly equivalent in magnitude.
 
 ## Mouse Fallback Configuration
 
@@ -77,6 +84,8 @@ The mouse fallback gesture detection code can be tweaked with the following para
 | `DIGITIZER_SWIPE_RIGHT_KC`                     | (Optional) The keycode to generate when a swipe right gesture is detected                                                        | `QK_MOUSE_BUTTON_4` |
 | `DIGITIZER_SWIPE_UP_KC`                        | (Optional) The keycode to generate when a swipe up gesture is detected                                                           | `KC_LEFT_GUI`       |
 | `DIGITIZER_SWIPE_DOWN_KC`                      | (Optional) The keycode to generate when a swipe down gesture is detected                                                         | `KC_ESC`            |
+
+If either `DIGITIZER_REPORT_FINGER_PRESSURE` or `DIGITIZER_REPORT_FINGER_SIZE` are enabled then the pressre/size information will be used for lift-off detection. This reduces jumping that can occur when removing a finger from the trackpad. Pressure information tends to work more reliably than the size data.
 
 ## Split Keyboard Configuration
 

@@ -290,12 +290,12 @@ static bool usb_requests_hook_cb(USBDriver *usbp) {
                             case DIGITIZER_INTERFACE:
 #endif
                                 // Touchpad set feature reports - TODO: Relocate?
-                                if ((setup->wValue.hbyte == 0x3) && (setup->wValue.lbyte == REPORT_ID_DIGITIZER_CONFIGURATION)) {
+                                if ((setup->wValue.hbyte == 0x3) && (setup->wValue.lbyte == REPORT_ID_DIGITIZER_FUNCTION_SWITCH)) {
                                     // TODO: Disable the touchpad/buttons on demand from the host For now just ACK the message by
                                     // sending back an empty packet with our report id.
                                     usbSetupTransfer(usbp, &(setup->wValue.lbyte), 1, NULL);
                                     return true;
-                                } else if ((setup->wValue.hbyte == 0x3) && (setup->wValue.lbyte == REPORT_ID_DIGITIZER_FUNCTION_SWITCH)) {
+                                } else if ((setup->wValue.hbyte == 0x3) && (setup->wValue.lbyte == REPORT_ID_DIGITIZER_INPUT_MODE)) {
                                     // TODO: Mode switching - Windows precision touchpads should start up reporting as a mouse, then switch
                                     // to trackpad reports if we get asked. For now just ACK the message by sending back an empty packet
                                     // with our report id.
@@ -527,6 +527,12 @@ void send_digitizer(report_digitizer_t *report) {
 #endif
 }
 
+void send_plover_hid(report_plover_hid_t *report) {
+#ifdef PLOVER_HID_ENABLE
+    send_report(USB_ENDPOINT_IN_PLOVER_HID, report, sizeof(report_plover_hid_t));
+#endif
+}
+
 void send_digitizer_stylus(report_digitizer_stylus_t *report) {
 #ifdef DIGITIZER_ENABLE
     send_report(USB_ENDPOINT_IN_DIGITIZER, report, sizeof(report_digitizer_stylus_t));
@@ -622,8 +628,9 @@ __attribute__((weak)) void virtser_recv(uint8_t c) {
 
 void virtser_task(void) {
     uint8_t buffer[CDC_EPSIZE];
-    while (receive_report(USB_ENDPOINT_OUT_CDC_DATA, buffer, sizeof(buffer))) {
-        for (int i = 0; i < sizeof(buffer); i++) {
+    size_t  received;
+    while ((received = usb_endpoint_out_receive_bytes(&usb_endpoints_out[USB_ENDPOINT_OUT_CDC_DATA], buffer, sizeof(buffer), TIME_IMMEDIATE)) > 0) {
+        for (size_t i = 0; i < received; i++) {
             virtser_recv(buffer[i]);
         }
     }

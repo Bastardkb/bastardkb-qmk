@@ -10,6 +10,7 @@
 
 #define DIGITIZER_MOTION_PIN GP11
 #define DIGITIZER_MOTION_PIN_ACTIVE_LOW yes
+#define DIGITIZER_REPORT_FINGER_PRESSURE
 
 // If enabled, the stylus will automatically be detected if the touch is small and round.
 // #define DIGITIZER_HAS_STYLUS yes

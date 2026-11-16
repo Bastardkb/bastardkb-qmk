@@ -1,0 +1,9 @@
+{
+    "config": {
+        "features": {
+            "console": true,
+            "digitizer": true,
+            "pointing_device": true
+        }
+    }
+}

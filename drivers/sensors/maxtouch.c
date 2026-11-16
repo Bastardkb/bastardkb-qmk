@@ -159,6 +159,16 @@
 #    define MXT_T47_CONFTHR 6
 #endif
 
+// The amplitude is optionally reported as pressure information,
+// but the value may need to be scaled on larger devices.
+#ifndef MXT_T100_AMPL_COEFF
+#    define MXT_T100_AMPL_COEFF 0
+#endif
+
+#ifndef MAX_T100_AMPL_OFFSET
+#    define MAX_T100_AMPL_OFFSET 0
+#endif
+
 // Data from the object table. Registers are not at fixed addresses, they may vary between firmware
 // versions. Instead must read the addresses from the object table.
 static uint16_t t2_encryption_status_address                 = 0;
@@ -397,6 +407,9 @@ void maxtouch_init(void) {
         cfg.cfg1         = rotation;
         cfg.scraux       = 0x7;                                             // AUX data: Report the number of touch events, touch area, anti touch area
         cfg.tchaux       = 0x2;                                             // report amplitude
+#ifdef DIGITIZER_REPORT_FINGER_SIZE
+        cfg.tchaux       |= 0x8;
+#endif
         cfg.tcheventcfg  = 24;                                              // Disable reporting suppressed events
         cfg.numtch       = DIGITIZER_CONTACT_COUNT;                         // The number of touch reports we want to receive (upto 10)
         cfg.xsize        = MXT_MATRIX_X_SIZE;                               // Make configurable as this depends on the sensor design.
@@ -434,6 +447,10 @@ void maxtouch_init(void) {
         cfg.yrange       = DIGITIZER_RESOLUTION_Y - 1; // the host uses this to set the speed of the pointer.
 #endif
         cfg.cfg2         = MXT_CONFTHR; // Touch debounce
+
+        // Scale amplitude reporting
+        cfg.amplcoeff    = MXT_T100_AMPL_COEFF;
+        cfg.amploffset   = MAX_T100_AMPL_OFFSET;
 
         i2c_status_t status = i2c_write_register16(MXT336UD_ADDRESS, t100_multiple_touch_touchscreen_address, (uint8_t *)&cfg, sizeof(mxt_touch_multiscreen_t100), MXT_I2C_TIMEOUT_MS);
         if (status != I2C_STATUS_SUCCESS) {
@@ -515,6 +532,10 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                     const uint16_t x          = message.data[1] | (message.data[2] << 8);
                     const uint16_t y          = message.data[3] | (message.data[4] << 8);
                     const uint8_t  ampl       = message.data[5];
+#ifdef DIGITIZER_REPORT_FINGER_SIZE
+                    digitizer_report.contacts[contact_id].width = message.data[6];
+                    digitizer_report.contacts[contact_id].height = message.data[7];
+#endif
                     // uprintf("EVT[%u] %d %d %ux%u %u\n", contact_id, event, type, x, y, ampl);
 
                     switch (type) {
@@ -530,7 +551,9 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
                     }
 
                     digitizer_report.contacts[contact_id].in_range = true;
-
+#ifdef DIGITIZER_REPORT_FINGER_PRESSURE
+                    digitizer_report.contacts[contact_id].pressure = ampl;
+#endif
                     if (type == MXT_FINGER) {
                         if (event == MXT_DOWN || event == MXT_MOVE) {
                             digitizer_report.contacts[contact_id].tip = true;

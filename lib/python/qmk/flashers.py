@@ -9,7 +9,6 @@ import usb.core
 from qmk.constants import BOOTLOADER_VIDS_PIDS
 from milc import cli
 
-# yapf: disable
 _PID_TO_MCU = {
     '2fef': 'atmega16u2',
     '2ff0': 'atmega32u2',
@@ -17,7 +16,7 @@ _PID_TO_MCU = {
     '2ff4': 'atmega32u4',
     '2ff9': 'at90usb64',
     '2ffa': 'at90usb162',
-    '2ffb': 'at90usb128'
+    '2ffb': 'at90usb128',
 }
 
 AVRDUDE_MCU = {
@@ -25,7 +24,6 @@ AVRDUDE_MCU = {
     'atmega328p': 'm328p',
     'atmega328': 'm328',
 }
-# yapf: enable
 
 
 class DelayedKeyboardInterrupt:
@@ -136,6 +134,10 @@ def _find_serial_port(vid, pid):
     return None
 
 
+def _flash_bootloadhid(file):
+    cli.run(['bootloadHID', '-r', file], capture_output=False)
+
+
 def _flash_caterina(details, file):
     port = _find_serial_port(details[0], details[1])
     if port:
@@ -218,6 +220,8 @@ def flasher(mcu, file):
     time.sleep(1)
     if bl == 'atmel-dfu':
         _flash_atmel_dfu(details, file)
+    elif bl == 'bootloadhid':
+        _flash_bootloadhid(file)
     elif bl == 'caterina':
         if _flash_caterina(details, file):
             return (True, "The Caterina bootloader was found but is not writable. Check 'qmk doctor' output for advice.")

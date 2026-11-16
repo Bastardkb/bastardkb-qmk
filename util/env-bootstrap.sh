@@ -39,6 +39,53 @@
 { # this ensures the entire script is downloaded #
     set -eu
 
+    # Prevent user grep settings from injecting flags (e.g. --color=always) that
+    # corrupt captured output and break pattern matching throughout this script.
+    unset GREP_OPTIONS GREP_COLOR GREP_COLORS
+
+    # Force the C locale so `tr`/`grep`/`sed`/`sort` behave the same on every
+    # system, and clear other variables which alter tool behavior.
+    export LC_ALL=C
+    unset CDPATH POSIXLY_CORRECT TAR_OPTIONS
+
+    # Drop out of any inherited Python venv; `deactivate` doesn't exist in this
+    # process, so strip its $PATH entries and marker variables by hand.
+    if [ -n "${VIRTUAL_ENV:-}" ]; then
+        clean_path=''
+        old_ifs="${IFS}"
+        IFS=':'
+        for path_entry in $PATH; do
+            case "$path_entry" in
+                "$VIRTUAL_ENV"/bin | "$VIRTUAL_ENV"/Scripts) ;;
+                *) clean_path="${clean_path:+${clean_path}:}${path_entry}" ;;
+            esac
+        done
+        IFS="${old_ifs}"
+        PATH="${clean_path}"
+        export PATH
+        unset VIRTUAL_ENV VIRTUAL_ENV_PROMPT clean_path old_ifs path_entry
+    fi
+
+    # Wipe all PYTHON* variables (keeping PYTHON_TARGET_VERSION, which this
+    # script uses) so the user's Python settings can't leak into the
+    # interpreters and builds managed by `uv`.
+    saved_python_target_version="${PYTHON_TARGET_VERSION:-}"
+    for env_var_name in $(env | LC_ALL=C sed -n 's/^\(PYTHON[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$env_var_name" 2>/dev/null || true
+    done
+    [ -z "$saved_python_target_version" ] || export PYTHON_TARGET_VERSION="$saved_python_target_version"
+    unset saved_python_target_version env_var_name
+    export PYTHONNOUSERSITE=1
+
+    # Clear conda/pip/uv overrides which would affect dependency resolution or
+    # builds; proxy, TLS, and index/mirror variables stay for corporate networks.
+    unset CONDA_PREFIX CONDA_DEFAULT_ENV
+    unset PIP_REQUIRE_VIRTUALENV PIP_TARGET PIP_PREFIX PIP_USER
+    unset SETUPTOOLS_USE_DISTUTILS
+    unset UV_NO_BUILD_ISOLATION UV_OFFLINE UV_NO_INDEX \
+          UV_CONSTRAINT UV_BUILD_CONSTRAINT UV_OVERRIDE \
+          UV_SYSTEM_PYTHON UV_NO_MANAGED_PYTHON
+
     BOOTSTRAP_TMPDIR="$(mktemp -d /tmp/qmk-bootstrap-failure.XXXXXX)"
     trap 'rm -rf "$BOOTSTRAP_TMPDIR" >/dev/null 2>&1 || true' EXIT
     FAILURE_FILE="${BOOTSTRAP_TMPDIR}/fail"
@@ -171,6 +218,15 @@ __EOT__
         fi
     }
 
+    check_release_tag() {
+        # An empty tag means the GitHub API call failed, usually from rate limiting.
+        if [ -z "$2" ]; then
+            echo "Could not determine the latest $1 release." >&2
+            echo "If GitHub API rate limits are the cause, set GITHUB_TOKEN to raise them." >&2
+            exit 1
+        fi
+    }
+
     fn_os() {
         local os_name=$(echo ${1:-} | tr 'A-Z' 'a-z')
         if [ -z "$os_name" ]; then
@@ -225,11 +281,28 @@ __EOT__
         macos) echo "zstd clang-format make hidapi libusb dos2unix git" ;;
         windows) echo "base-devel: zstd:p toolchain:p clang:p hidapi:p dos2unix: git: unzip:" ;;
         linux)
+            if ldd --version 2>&1 | grep -qi musl; then
+                echo >&2
+                echo "Sorry, QMK's pre-built toolchains are compiled against glibc and will not run on musl-based Linux distributions." >&2
+                echo >&2
+                echo "Try using a glibc-based distribution, or use Docker instead:" >&2
+                echo "  - https://docs.qmk.fm/newbs_getting_started#set-up-your-environment" >&2
+                echo "  - https://docs.qmk.fm/#/getting_started_docker" >&2
+                echo >&2
+                echo "If you cannot use a compatible distro, you can try installing the \`qmk\` Python package manually using \`pip\`, most likely requiring a virtual environment:" >&2
+                echo "  % python3 -m pip install qmk" >&2
+                echo >&2
+                echo "All other dependencies will need to be installed manually, such as make, git, AVR and ARM toolchains, and associated flashing utilities." >&2
+                echo >&2
+                echo "**NOTE**: QMK does not provide official support for musl-based environments. Here be dragons, you are on your own." >&2
+                signal_execution_failure
+                return
+            fi
             case $(grep ID /etc/os-release) in
             *arch* | *manjaro* | *cachyos*) echo "zstd base-devel clang diffutils wget unzip zip hidapi dos2unix git" ;;
             *debian* | *ubuntu*) echo "zstd build-essential clang-format diffutils wget unzip zip libhidapi-hidraw0 dos2unix git" ;;
             *fedora*) echo "zstd clang diffutils which gcc git wget unzip zip hidapi dos2unix libusb-devel libusb1-devel libusb-compat-0.1-devel libusb0-devel git epel-release" ;;
-            *suse*) echo "zstd clang diffutils wget unzip zip libhidapi-hidraw0 dos2unix git libusb-1_0-devel gzip which" ;;
+            *suse*) echo "zstd make gcc binutils clang diffutils wget unzip zip libhidapi-hidraw0 dos2unix git libusb-1_0-devel gzip which" ;;
             *gentoo*) echo "zstd sys-apps/diffutils wget unzip zip dev-libs/hidapi dos2unix dev-vcs/git dev-libs/libusb app-arch/gzip which" ;;
             *)
                 echo >&2
@@ -264,6 +337,10 @@ __EOT__
     print_package_manager_deps_and_delay() {
         get_package_manager_deps | tr ' ' '\n' | sort | xargs -I'{}' echo "    - {}" >&2
         exit_if_execution_failed
+        if [ -n "${1:-}" ]; then
+            echo >&2
+            echo "$1" >&2
+        fi
         preinstall_delay || exit 1
     }
 
@@ -273,7 +350,11 @@ __EOT__
         macos)
             if [ -n "$(command -v brew 2>/dev/null || true)" ]; then
                 echo "It will also install the following system packages using 'brew':" >&2
-                print_package_manager_deps_and_delay
+                local intel_note=""
+                if [ "$(fn_arch)" = "X64" ]; then
+                    intel_note="NOTE: Homebrew no longer provides pre-built packages for Intel Macs, so some of the above may be built from source. This can take a long time."
+                fi
+                print_package_manager_deps_and_delay "$intel_note"
 
                 brew update
 
@@ -287,12 +368,14 @@ __EOT__
                 fi
                 done
 
-                if [ -n "${existing:-}" ]; then
-                    brew upgrade $existing
-                fi
-                if [ -n "${new:-}" ]; then
-                    brew install $new
-                fi
+                # Homebrew no longer builds Intel macOS bottles (tier 3); when a
+                # bottle is missing, retry the formula as a source build.
+                for dep in ${existing:-}; do
+                    brew upgrade "$dep" || brew upgrade --build-from-source "$dep"
+                done
+                for dep in ${new:-}; do
+                    brew install "$dep" || brew install --build-from-source "$dep"
+                done
             else
                 echo "Please install 'brew' to continue. See https://brew.sh/ for more information." >&2
                 exit 1
@@ -321,25 +404,24 @@ __EOT__
             *fedora*)
                 echo "It will also install the following system packages using 'dnf':" >&2
                 print_package_manager_deps_and_delay
-                # Some RHEL-likes need EPEL for hidapi
+                # Some RHEL-likes need EPEL for hidapi and libusb packages
                 $(nsudo) dnf -y install epel-release 2>/dev/null || true
-                # RHEL-likes have some naming differences in libusb packages, so manually handle those
-                $(nsudo) dnf -y install $(get_package_manager_deps | tr ' ' '\n' | grep -v 'epel-release' | grep -v libusb | tr '\n' ' ')
-                for pkg in $(get_package_manager_deps | tr ' ' '\n' | grep libusb); do
+                # RHEL-likes have naming differences in libusb/hidapi packages; try each individually
+                $(nsudo) dnf -y install $(get_package_manager_deps | tr ' ' '\n' | grep -v 'epel-release' | grep -v libusb | grep -v hidapi | tr '\n' ' ')
+                for pkg in $(get_package_manager_deps | tr ' ' '\n' | grep -E 'libusb|hidapi'); do
                     $(nsudo) dnf -y install "$pkg" 2>/dev/null || true
                 done
                 ;;
             *opensuse* | *suse*)
-                echo "It will also install development tools as well as the following system packages using 'zypper':" >&2
+                echo "It will also install the following system packages using 'zypper':" >&2
                 print_package_manager_deps_and_delay
                 $(nsudo) zypper --non-interactive refresh
-                $(nsudo) zypper --non-interactive install -t pattern devel_basis devel_C_C++
                 $(nsudo) zypper --non-interactive install $(get_package_manager_deps)
                 ;;
             *gentoo*)
                 echo "It will also install the following system packages using 'emerge':" >&2
                 print_package_manager_deps_and_delay
-                $(nsudo) emerge --sync
+                $(nsudo) emaint sync
                 $(nsudo) emerge --noreplace --ask=n $(get_package_manager_deps | tr ' ' '\n') || signal_execution_failure
                 exit_if_execution_failed
                 ;;
@@ -357,7 +439,14 @@ __EOT__
 
     install_uv() {
         # Install `uv` (or update as necessary)
-        download_url https://astral.sh/uv/install.sh - | TMPDIR="$(windows_ish_path "${TMPDIR:-}")" UV_INSTALL_DIR="$(windows_ish_path "${UV_INSTALL_DIR:-}")" sh
+        download_url https://astral.sh/uv/install.sh - | TMPDIR="$(posix_ish_path "${TMPDIR:-}")" UV_INSTALL_DIR="$(windows_ish_path "${UV_INSTALL_DIR:-}")" sh
+
+        # Workaround for UV installer not pushing UV_TOOL_BIN_DIR into the env when used with their installer
+        if [ "$(uname -o 2>/dev/null || true)" = "Msys" ]; then
+            if [ "${UV_NO_MODIFY_PATH:-}" != "1" ]; then
+                echo -e "# Workaround for UV installer not pushing UV_TOOL_BIN_DIR into the env when used with their installer\nexport PATH=\"${UV_TOOL_BIN_DIR}:\$PATH\"" > /etc/profile.d/qmk-uv-env.sh
+            fi
+        fi
     }
 
     setup_paths() {
@@ -417,8 +506,9 @@ __EOT__
     install_toolchains() {
         # Get the latest toolchain release from https://github.com/qmk/qmk_toolchains
         local latest_toolchains_release=$(github_api_call repos/qmk/qmk_toolchains/releases/latest - | grep -oE '"tag_name": "[^"]+' | grep -oE '[^"]+$')
+        check_release_tag qmk_toolchains "$latest_toolchains_release"
         # Download the specific release asset with a matching keyword
-        local toolchain_url=$(github_api_call repos/qmk/qmk_toolchains/releases/tags/$latest_toolchains_release - | grep -oE '"browser_download_url": "[^"]+"' | grep -oE 'https://[^"]+' | grep $(fn_os)$(fn_arch))
+        local toolchain_url=$(github_api_call repos/qmk/qmk_toolchains/releases/tags/$latest_toolchains_release - | grep -oE '"browser_download_url": "[^"]+"' | grep -oE 'https://[^"]+' | grep -E "qmk_toolchains-.*$(fn_os)$(fn_arch)")
         if [ -z "$toolchain_url" ]; then
             echo "No toolchain found for this OS/Arch combination." >&2
             exit 1
@@ -444,8 +534,9 @@ __EOT__
 
         # Get the latest flashing tools release from https://github.com/qmk/qmk_flashutils
         local latest_flashutils_release=$(github_api_call repos/qmk/qmk_flashutils/releases/latest - | grep -oE '"tag_name": "[^"]+' | grep -oE '[^"]+$')
+        check_release_tag qmk_flashutils "$latest_flashutils_release"
         # Download the specific release asset with a matching keyword
-        local flashutils_url=$(github_api_call repos/qmk/qmk_flashutils/releases/tags/$latest_flashutils_release - | grep -oE '"browser_download_url": "[^"]+"' | grep -oE 'https://[^"]+' | grep "$osarchvariant")
+        local flashutils_url=$(github_api_call repos/qmk/qmk_flashutils/releases/tags/$latest_flashutils_release - | grep -oE '"browser_download_url": "[^"]+"' | grep -oE 'https://[^"]+' | grep -E "qmk_flashutils-.*$osarchvariant")
         if [ -z "$flashutils_url" ]; then
             echo "No flashing tools found for this OS/Arch combination." >&2
             exit 1
@@ -464,27 +555,46 @@ __EOT__
     }
 
     install_linux_udev_rules() {
-        # Download the udev rules to the toolchains location
-        echo "Downloading QMK udev rules file..." >&2
-        local qmk_rules_target_file="$QMK_DISTRIB_DIR/50-qmk.rules"
-        download_url "https://raw.githubusercontent.com/qmk/qmk_firmware/refs/heads/master/util/udev/50-qmk.rules" "$qmk_rules_target_file"
+        # Get the latest qmk_udev release
+        local latest_udev_release=$(github_api_call repos/qmk/qmk_udev/releases/latest - | grep -oE '"tag_name": "[^"]+' | grep -oE '[^"]+$')
+        check_release_tag qmk_udev "$latest_udev_release"
+        echo "Using qmk_udev release: $latest_udev_release" >&2
 
-        # Install the udev rules -- path list is aligned with qmk doctor's linux.py
-        local udev_rules_paths="
-            /usr/lib/udev/rules.d
-            /usr/local/lib/udev/rules.d
-            /run/udev/rules.d
-            /etc/udev/rules.d
-        "
-        for udev_rules_dir in $udev_rules_paths; do
-            if [ -d "$udev_rules_dir" ]; then
-                echo "Installing udev rules to $udev_rules_dir/50-qmk.rules ..." >&2
-                $(nsudo) mv "$qmk_rules_target_file" "$udev_rules_dir"
-                $(nsudo) chown 0:0 "$udev_rules_dir/50-qmk.rules"
-                $(nsudo) chmod 644 "$udev_rules_dir/50-qmk.rules"
-                break
+        # Download the udev rules file
+        local qmk_rules_file="$QMK_DISTRIB_DIR/50-qmk.rules"
+        local release_base="https://github.com/qmk/qmk_udev/releases/download/$latest_udev_release"
+        download_url "$release_base/50-qmk.rules" "$qmk_rules_file"
+
+        # Download the architecture-appropriate qmk_id binary
+        local arch="$(fn_arch)"
+        local qmk_id_file="$QMK_DISTRIB_DIR/qmk_id"
+        download_url "$release_base/qmk_id-linux${arch}" "$qmk_id_file"
+
+        # Remove existing QMK udev rules and qmk_id helpers from all standard locations
+        echo "Removing existing QMK udev rules and helpers..." >&2
+        for dir in /etc/udev/rules.d /run/udev/rules.d /usr/lib/udev/rules.d /usr/local/lib/udev/rules.d /lib/udev/rules.d; do
+            if [ -d "$dir" ]; then
+                for f in "$dir"/*-qmk.rules; do
+                    [ -e "$f" ] && echo "Removing $f" >&2 && $(nsudo) rm -f "$f"
+                done
             fi
         done
+        for dir in /usr/lib/udev /usr/local/lib/udev /lib/udev; do
+            [ -e "$dir/qmk_id" ] && echo "Removing $dir/qmk_id" >&2 && $(nsudo) rm -f "$dir/qmk_id"
+        done
+
+        # Install qmk_id binary
+        echo "Installing /usr/lib/udev/qmk_id ..." >&2
+        $(nsudo) install -d -m 0755 /usr/lib/udev
+        $(nsudo) install -m 0755 "$qmk_id_file" /usr/lib/udev/qmk_id
+
+        # Install udev rules
+        echo "Installing /etc/udev/rules.d/50-qmk.rules ..." >&2
+        $(nsudo) install -d -m 0755 /etc/udev/rules.d
+        $(nsudo) install -m 0644 "$qmk_rules_file" /etc/udev/rules.d/50-qmk.rules
+
+        # Clean up downloaded files
+        rm -f "$qmk_rules_file" "$qmk_id_file" || true
 
         # Reload udev rules
         if command -v udevadm >/dev/null 2>&1; then
@@ -499,6 +609,7 @@ __EOT__
     install_windows_drivers() {
         # Get the latest driver installer release from https://github.com/qmk/qmk_driver_installer
         local latest_driver_installer_release=$(github_api_call repos/qmk/qmk_driver_installer/releases/latest - | grep -oE '"tag_name": "[^"]+' | grep -oE '[^"]+$')
+        check_release_tag qmk_driver_installer "$latest_driver_installer_release"
         # Download the specific release asset
         local driver_installer_url=$(github_api_call repos/qmk/qmk_driver_installer/releases/tags/$latest_driver_installer_release - | grep -oE '"browser_download_url": "[^"]+"' | grep -oE 'https://[^"]+' | grep '\.exe')
         if [ -z "$driver_installer_url" ]; then
@@ -558,7 +669,14 @@ __EOT__
     setup_paths
 
     # Work out where we want to install the distribution and tools now that `uv` is installed
-    export QMK_DISTRIB_DIR="$(posix_ish_path "${QMK_DISTRIB_DIR:-$(printf 'import platformdirs\nprint(platformdirs.user_data_dir("qmk"))' | uv_command run --quiet --python $PYTHON_TARGET_VERSION --with platformdirs -)}")"
+    export QMK_DISTRIB_DIR="$(posix_ish_path "${QMK_DISTRIB_DIR:-$(printf 'import platformdirs\nprint(platformdirs.user_data_dir("qmk"))' | uv_command run --quiet --no-project --python $PYTHON_TARGET_VERSION --with platformdirs -)}")"
+
+    # `export` masks any failure of the `uv` invocation above, so bail out here
+    # rather than continue with an empty directory.
+    if [ -z "$QMK_DISTRIB_DIR" ]; then
+        echo "Could not determine the QMK distribution directory." >&2
+        exit 1
+    fi
 
     # Clear out the distrib directory if necessary
     if [ -z "${SKIP_CLEAN:-}" ] || [ -z "${SKIP_QMK_TOOLCHAINS:-}" -a -z "${SKIP_QMK_FLASHUTILS:-}" ]; then

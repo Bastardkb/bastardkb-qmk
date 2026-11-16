@@ -44,7 +44,7 @@ enum hid_report_ids {
     REPORT_ID_JOYSTICK,
     REPORT_ID_DIGITIZER,
     REPORT_ID_DIGITIZER_STYLUS,
-    REPORT_ID_DIGITIZER_CONFIGURATION,
+    REPORT_ID_DIGITIZER_INPUT_MODE,
     REPORT_ID_DIGITIZER_GET_FEATURE,
     REPORT_ID_DIGITIZER_FUNCTION_SWITCH,
     REPORT_ID_DIGITIZER_CERTIFICATE,
@@ -52,6 +52,11 @@ enum hid_report_ids {
 };
 
 #define IS_VALID_REPORT_ID(id) ((id) >= REPORT_ID_ALL && (id) <= REPORT_ID_COUNT)
+
+// Plover HID has its own dedicated interface rather than the shared endpoint, so its report ID
+// is fixed by the protocol at 0x50 ('P') and is intentionally NOT a member of enum
+// hid_report_ids above (which only enumerates shared-endpoint reports up to REPORT_ID_COUNT).
+#define REPORT_ID_PLOVER_HID 0x50
 
 /* Mouse buttons */
 #define MOUSE_BTN_MASK(n) (1 << (n))
@@ -202,22 +207,27 @@ typedef struct {
     uint32_t usage;
 } PACKED report_programmable_button_t;
 
+typedef struct {
+    uint8_t report_id; // REPORT_ID_PLOVER_HID
+    uint8_t data[8];
+} PACKED report_plover_hid_t;
+
 #ifdef MOUSE_EXTENDED_REPORT
-#    define MOUSE_REPORT_XY_MIN INT16_MIN
+#    define MOUSE_REPORT_XY_MIN (INT16_MIN + 1)
 #    define MOUSE_REPORT_XY_MAX INT16_MAX
 typedef int16_t mouse_xy_report_t;
 #else
-#    define MOUSE_REPORT_XY_MIN INT8_MIN
+#    define MOUSE_REPORT_XY_MIN (INT8_MIN + 1)
 #    define MOUSE_REPORT_XY_MAX INT8_MAX
 typedef int8_t mouse_xy_report_t;
 #endif
 
 #ifdef WHEEL_EXTENDED_REPORT
-#    define MOUSE_REPORT_HV_MIN INT16_MIN
+#    define MOUSE_REPORT_HV_MIN (INT16_MIN + 1)
 #    define MOUSE_REPORT_HV_MAX INT16_MAX
 typedef int16_t mouse_hv_report_t;
 #else
-#    define MOUSE_REPORT_HV_MIN INT8_MIN
+#    define MOUSE_REPORT_HV_MIN (INT8_MIN + 1)
 #    define MOUSE_REPORT_HV_MAX INT8_MAX
 typedef int8_t mouse_hv_report_t;
 #endif
@@ -250,9 +260,15 @@ typedef struct {
 typedef struct {
     uint8_t  confidence : 1;
     uint8_t  tip : 1;
-    uint8_t  reserved : 6;
     uint8_t  contact_id : 3;
-    uint8_t  reserved2 : 5;
+    uint8_t  reserved2 : 3;
+#ifdef DIGITIZER_REPORT_FINGER_PRESSURE
+    uint8_t  pressure;
+#endif
+#ifdef DIGITIZER_REPORT_FINGER_SIZE
+    uint8_t  width;
+    uint8_t  height;
+#endif
     uint16_t x;
     uint16_t y;
 } PACKED digitizer_finger_report_t;

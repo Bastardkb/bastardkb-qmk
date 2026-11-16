@@ -13,7 +13,7 @@
 #    include "action.h"
 
 #    ifndef DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT
-#        define DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT 200
+#        define DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT 150
 #    endif
 
 #    ifndef DIGITIZER_MOUSE_TAP_DURATION
@@ -21,7 +21,7 @@
 #    endif
 
 #    ifndef DIGITIZER_MOUSE_TAP_DISTANCE
-#        define DIGITIZER_MOUSE_TAP_DISTANCE 25
+#        define DIGITIZER_MOUSE_TAP_DISTANCE (DIGITIZER_RESOLUTION_X / DIGITIZER_WIDTH_MM)
 #    endif
 
 #    ifndef DIGITIZER_SCROLL_DIVISOR
@@ -77,6 +77,8 @@ bool digitizer_taps_as_clicks = false;
 // Microsofts Precision Trackpad protocol. This variable can also be modified by users
 // to force reporting as a mouse or as a digitizer.
 bool                  digitizer_send_mouse_reports = true;
+bool                  force_digitizer_send_mouse_reports = false;
+
 static report_mouse_t mouse_report                 = {};
 
 static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report);
@@ -105,7 +107,7 @@ static bool digitizer_mouse_fallback_init(void)
  * @return report_mouse_t
  */
 static report_mouse_t digitizer_get_mouse_report(report_mouse_t _mouse_report) {
-    if (digitizer_send_mouse_reports) {
+    if (force_digitizer_send_mouse_reports || digitizer_send_mouse_reports) {
         report_mouse_t report = mouse_report;
         // Retain the button state, but drop any motion.
         memset(&mouse_report, 0, sizeof(report_mouse_t));
@@ -164,18 +166,41 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
     static int      last_contacts      = 0;
     static uint16_t last_x             = 0;
     static uint16_t last_y             = 0;
-    const uint16_t  x                  = report->fingers[0].x;
-    const uint16_t  y                  = report->fingers[0].y;
+    uint16_t  x                        = 0;
+    uint16_t  y                        = 0;
     const uint32_t  duration           = timer_elapsed32(contact_start_time);
     int             contacts           = 0;
+
+#if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
+    // Buffer movement while the contact is shrinking so it can be
+    // dropped if we are lifting off.
+    int16_t         strength           = 0;
+    static bool     buffering          = false;
+    static int      buffered_x         = 0;
+    static int      buffered_y         = 0;
+    #define STRENGTH_BUFFER_SIZE 8
+    static int16_t  strength_buffer[STRENGTH_BUFFER_SIZE] = {};
+    static uint8_t  strength_buffer_index = 0;
+    static uint8_t  strength_buffer_size  = 0;
+#endif
 
     memset(&mouse_report, 0, sizeof(report_mouse_t));
 
     for (int i = 0; i < DIGITIZER_FINGER_COUNT; i++) {
         if (report->fingers[i].tip) {
+            if (contacts == 0) {
+                x = report->fingers[i].x;
+                y = report->fingers[i].y;
+#if defined(DIGITIZER_REPORT_FINGER_PRESSURE)
+                strength =  report->fingers[i].pressure;
+#elif defined(DIGITIZER_REPORT_FINGER_SIZE)
+                strength = report->fingers[i].width * report->fingers[i].height;
+#endif
+            }
             contacts++;
         }
     }
+
     switch (state) {
         case None: {
             if (contacts != 0) {
@@ -205,10 +230,63 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
         case Drag:
         case MoveScroll: {
             if (contacts == 0) {
+#if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
+                buffered_x = 0;
+                buffered_y = 0;
+                buffering = false;
+                strength_buffer_index = 0;
+                strength_buffer_size = 0;
+#endif
                 state = None;
             } else if (contacts == 1) {
-                mouse_report.x = x - last_x;
-                mouse_report.y = y - last_y;
+#if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
+                // Ignore events with no movement
+                if ((x - last_x) == 0 && (y - last_y) == 0)
+                {
+                    break;
+                }
+                strength_buffer[strength_buffer_index] = strength;
+                strength_buffer_index = (strength_buffer_index + 1) % STRENGTH_BUFFER_SIZE;
+                if (strength_buffer_size < STRENGTH_BUFFER_SIZE) {
+                    strength_buffer_size ++;
+                }
+
+                uint16_t average_strength = 0;
+                for (uint8_t i=0; i<strength_buffer_size; i++) {
+                    average_strength += strength_buffer[i];
+                }
+                average_strength = average_strength / strength_buffer_size;
+
+                // A 10% drop in strength is more than just noise, treat it as a potental lift off.
+                if (strength * 10 < average_strength * 9)
+                {
+                    buffering = true;
+                }
+                if (strength >= average_strength)
+                {
+                    buffering = false;
+                }
+
+                if (buffering)
+                {
+                    buffered_x += (x - last_x);
+                    buffered_y += (y - last_y);
+                    break;
+                }
+                if (last_contacts == 1)
+                {
+                    mouse_report.x = x - last_x + buffered_x;
+                    mouse_report.y = y - last_y + buffered_y;
+                    buffered_x = 0;
+                    buffered_y = 0;
+                }
+#else
+                if (last_contacts == 1)
+                {
+                    mouse_report.x = x - last_x;
+                    mouse_report.y = y - last_y;
+                }
+#endif
             } else if (contacts == 3 && duration < DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
                 state = Swipe;
             } else {
@@ -249,7 +327,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
                 state = None;
             } else if (duration > DIGITIZER_MOUSE_SWIPE_TIMEOUT) {
                 state = MoveScroll;
-            } else if (digitizer_send_mouse_reports) {
+            } else if (force_digitizer_send_mouse_reports || digitizer_send_mouse_reports) {
                 if (distance_x > DIGITIZER_MOUSE_SWIPE_DISTANCE && abs(distance_y) < DIGITIZER_MOUSE_SWIPE_THRESHOLD) {
                     // Swipe right
                     tap_code(DIGITIZER_SWIPE_RIGHT_KC);

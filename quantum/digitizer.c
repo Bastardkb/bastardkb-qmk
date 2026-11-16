@@ -146,9 +146,9 @@ void digitizer_init(void) {
     }
 #ifdef DIGITIZER_MOTION_PIN
 #    ifdef DIGITIZER_MOTION_PIN_ACTIVE_LOW
-    setPinInputHigh(DIGITIZER_MOTION_PIN);
+    gpio_set_pin_input_high(DIGITIZER_MOTION_PIN);
 #    else
-    setPinInput(DIGITIZER_MOTION_PIN);
+    gpio_set_pin_input(DIGITIZER_MOTION_PIN);
 #    endif
 #endif
 
@@ -162,9 +162,9 @@ void digitizer_init(void) {
  */
 __attribute__((weak)) bool digitizer_motion_detected(void) {
 #    ifdef DIGITIZER_MOTION_PIN_ACTIVE_LOW
-    return !readPin(DIGITIZER_MOTION_PIN);
+    return !gpio_read_pin(DIGITIZER_MOTION_PIN);
 #    else
-    return readPin(DIGITIZER_MOTION_PIN);
+    return gpio_read_pin(DIGITIZER_MOTION_PIN);
 #    endif
 }
 #endif
@@ -296,6 +296,13 @@ bool digitizer_task(void) {
                 report.fingers[finger_index].x          = clamp_report_value(scale_offsets[i].x + (tmp_state.contacts[i].x * scale_percentage) / 100, DIGITIZER_RESOLUTION_X);
                 report.fingers[finger_index].y          = clamp_report_value(scale_offsets[i].y + (tmp_state.contacts[i].y * scale_percentage) / 100, DIGITIZER_RESOLUTION_Y);
                 report.fingers[finger_index].confidence = tmp_state.contacts[i].confidence;
+#ifdef DIGITIZER_REPORT_FINGER_PRESSURE
+                report.fingers[finger_index].pressure   = tmp_state.contacts[i].pressure;
+#endif
+#ifdef DIGITIZER_REPORT_FINGER_SIZE
+                report.fingers[finger_index].width   = tmp_state.contacts[i].width;
+                report.fingers[finger_index].height   = tmp_state.contacts[i].height;
+#endif
             }
 #endif
 #ifdef DIGITIZER_HAS_STYLUS
@@ -337,7 +344,7 @@ bool digitizer_task(void) {
         } else {
             digitizer_update_mouse_report(&last_report);
         }
-        if (!digitizer_send_mouse_reports) {
+        if (!(force_digitizer_send_mouse_reports || digitizer_send_mouse_reports)) {
 #endif
             if (report.contact_count || button_state_changed) {
 #if DIGITIZER_FINGER_COUNT > 0

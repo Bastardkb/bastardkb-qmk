@@ -76,7 +76,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #    include "process_tap_dance.h"
 #endif
 #ifdef STENO_ENABLE
-#    include "process_steno.h"
+#    include "steno.h"
 #endif
 #ifdef KEY_OVERRIDE_ENABLE
 #    include "process_key_override.h"
@@ -152,6 +152,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 #ifdef CONNECTION_ENABLE
 #    include "connection.h"
+#endif
+#ifdef SEQUENCER_ENABLE
+#    include "sequencer.h"
 #endif
 
 static uint32_t last_input_modification_time = 0;
@@ -464,6 +467,8 @@ void quantum_init(void) {
 
     /* Also initialize layer state to trigger callback functions for layer_state */
     layer_state_set_kb((layer_state_t)layer_state);
+
+    eeconfig_prepare_datablocks();
 }
 
 /** \brief keyboard_init
@@ -522,13 +527,8 @@ void keyboard_init(void) {
 #ifdef RGBLIGHT_ENABLE
     rgblight_init();
 #endif
-#ifdef STENO_ENABLE_ALL
+#ifdef STENO_ENABLE
     steno_init();
-#endif
-#if defined(NKRO_ENABLE) && defined(FORCE_NKRO)
-#    pragma message "FORCE_NKRO option is now deprecated - Please migrate to NKRO_DEFAULT_ON instead."
-    keymap_config.nkro = 1;
-    eeconfig_update_keymap(&keymap_config);
 #endif
 #ifdef DIP_SWITCH_ENABLE
     dip_switch_init();
