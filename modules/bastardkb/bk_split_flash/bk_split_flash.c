@@ -872,8 +872,17 @@ static void bk_stream_step(void) {
                     bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
                 }
             } else {
-                bk_transport_marker(false, "ready-ack", s2m.ack);
-                bk_stream_finish(false);
+                if ((int32_t)(timer_read32() - bk_probe_start_ms) >= BK_SPLIT_FLASH_PROBE_TIMEOUT_MS) {
+                    bk_transport_marker(false, "ready-ack", s2m.ack);
+                    bk_stream_finish(false);
+                } else {
+                    // The peer may have lost its preparation state, or the response
+                    // may have been corrupted during startup. PREPARE is idempotent
+                    // for the same length, so restart that exchange within the
+                    // original probe deadline instead of aborting immediately.
+                    bk_phase       = BK_STREAM_PREPARE;
+                    bk_probe_at_ms = timer_read32() + BK_SPLIT_FLASH_PROBE_RETRY_MS;
+                }
             }
             break;
         }
