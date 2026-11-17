@@ -4,6 +4,7 @@
 
 #include "debug.h"
 #include "timer.h"
+#include "wait.h"
 #include "keyboard.h"
 #include "transactions.h"
 #include "crc.h"
@@ -19,11 +20,40 @@
 #include "wear_leveling/wear_leveling_rp2040_flash_config.h"
 
 #include "bk_split_flash.h"
+#include "argos.h"
 
-ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 2);
+ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
 
 // Transaction id value from the generated serial_transaction_id enum.
 #define BK_SPLIT_FLASH_TRANSACTION PUT_BK_SPLIT_FLASH
+
+// This is deliberately independent of bk_phase: the gate must close before the
+// first matrix scan, remain closed between chunks and during retries, and open
+// only at a deliberate terminal/no-clone decision.
+static bool bk_traffic_gate_armed;
+
+bool __real_transport_master(matrix_row_t master_matrix[], matrix_row_t slave_matrix[]);
+bool __real_transaction_rpc_exec(int8_t transaction_id, uint8_t initiator2target_buffer_size, const void *initiator2target_buffer, uint8_t target2initiator_buffer_size, void *target2initiator_buffer);
+
+// transport_master() runs QMK's periodic core sync even when no keys change.
+// Suppress the whole call while cloning instead of overriding the strong
+// transport_master_if_connected() implementation in split_util.c.
+bool __wrap_transport_master(matrix_row_t master_matrix[], matrix_row_t slave_matrix[]) {
+    if (bk_traffic_gate_armed) {
+        return true;
+    }
+    return __real_transport_master(master_matrix, slave_matrix);
+}
+
+// Argos, bk_led_matrix and lcd can bypass transactions_master() and issue RPCs
+// directly. Block that second path too. The clone uses
+// transport_execute_transaction() directly and is intentionally not wrapped.
+bool __wrap_transaction_rpc_exec(int8_t transaction_id, uint8_t initiator2target_buffer_size, const void *initiator2target_buffer, uint8_t target2initiator_buffer_size, void *target2initiator_buffer) {
+    if (bk_traffic_gate_armed) {
+        return false;
+    }
+    return __real_transaction_rpc_exec(transaction_id, initiator2target_buffer_size, initiator2target_buffer, target2initiator_buffer_size, target2initiator_buffer);
+}
 
 // The image streamed to the secondary: [XIP_BASE, __flash_binary_end). In
 // RP2040_FLASH_TIMECRIT.ld `__flash_binary_start` is flash1's origin (XIP_BASE,
@@ -34,6 +64,8 @@ extern const uint8_t __flash_binary_end[];
 
 STATIC_ASSERT(sizeof(bk_split_flash_m2s_t) == BK_SPLIT_FLASH_M2S_SIZE, "m2s chunk must be full-size");
 STATIC_ASSERT(sizeof(bk_split_flash_s2m_t) == BK_SPLIT_FLASH_S2M_SIZE, "s2m ack size mismatch");
+// The fingerprint lives in the argos EEPROM block; its slot must hold a CRC-32.
+STATIC_ASSERT(ARGOS_SIZE_SPLIT_FLASH_CONFIG == sizeof(uint32_t), "argos split flash slot must hold the CRC-32 fingerprint");
 // Keep the staging slot clear of the wear-leveling EEPROM region (base 0x1FE000
 // on this board; see the knowledge base's flash-size facts).
 STATIC_ASSERT(BK_SPLIT_FLASH_STAGING_OFFSET + BK_SPLIT_FLASH_STAGING_MAX <= WEAR_LEVELING_RP2040_FLASH_BASE, "staging overlaps the wear-leveling EEPROM");
@@ -560,6 +592,10 @@ static void __no_inline_not_in_flash_func(bk_split_flash_commit)(void) {
 }
 
 void keyboard_post_init_bk_split_flash(void) {
+    // keyboard_task() scans the matrix before housekeeping. Arm now so that
+    // neither that first scan nor an early community-module RPC can use the
+    // old peer's transaction table before the clone trigger is evaluated.
+    bk_traffic_gate_armed = is_keyboard_master();
     bk_split_flash_register_transaction();
 }
 
@@ -588,7 +624,7 @@ static uint32_t          bk_sent_crc;    // running CRC-32 of the bytes sent so 
 
 // Step-5 trigger: the master clones its image to the secondary once, when it
 // detects a new firmware was flashed to it. The fingerprint (whole-image CRC-32)
-// is persisted in the module's EEPROM datablock; a mismatch means "new
+// is persisted in the argos EEPROM block; a mismatch means "new
 // firmware". Outside the trigger
 // no stream runs and no re-flash happens.
 static bool     bk_triggered; // new firmware detected at boot
@@ -632,7 +668,8 @@ static void bk_indicator_begin(bk_indicator_state_t state) {
         rgb_matrix_set_speed_noeeprom(UINT8_MAX);
         rgb_matrix_sethsv_noeeprom(0, 255, 120);
     } else if (state == BK_INDICATOR_SUCCESS) {
-        rgb_matrix_mode_noeeprom(RGB_MATRIX_SOLID_COLOR);
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_BREATHING);
+        rgb_matrix_set_speed_noeeprom(UINT8_MAX);
         rgb_matrix_sethsv_noeeprom(85, 255, 120);
     }
 }
@@ -654,22 +691,6 @@ static void bk_indicator_task(void) {
         bk_indicator_restore();
     }
 }
-
-bool rgb_matrix_indicators_advanced_bk_split_flash(uint8_t led_min, uint8_t led_max) {
-    if (!is_keyboard_master() || bk_indicator_state == BK_INDICATOR_IDLE) {
-        return true;
-    }
-
-    if (bk_indicator_state == BK_INDICATOR_SUCCESS) {
-        uint32_t elapsed = timer_elapsed32(bk_indicator_started);
-        bool     on      = elapsed < BK_INDICATOR_SUCCESS_DURATION_MS && ((elapsed / 500) % 2) == 0;
-        for (uint8_t i = led_min; i < led_max; i++) {
-            rgb_matrix_set_color(i, 0, on ? 120 : 0, 0);
-        }
-    }
-
-    return true;
-}
 #else
 static void bk_indicator_begin(int state) {
     (void)state;
@@ -688,7 +709,7 @@ static uint32_t bk_image_crc_compute(void) {
 
 // Detect a new firmware: compare the persisted fingerprint with this image's.
 // Whether or not a reflash erases the EEPROM region, a new image has a new CRC
-// (and a fresh datablock is zeroed by eeconfig init), so either way a mismatch
+// (and a fresh EEPROM holds no matching fingerprint), so either way a mismatch
 // means the master was just updated.
 static bool bk_trigger_detect(void) {
     bk_image_crc = bk_image_crc_compute();
@@ -697,7 +718,7 @@ static bool bk_trigger_detect(void) {
         return false;
     }
     uint32_t stored = 0;
-    eeconfig_read_bk_split_flash_datablock(&stored, 0, sizeof(stored));
+    argos_read_eeprom(ARGOS_OFFSET_SPLIT_FLASH_CONFIG, &stored, sizeof(stored));
     return stored != bk_image_crc;
 }
 
@@ -705,7 +726,7 @@ static bool bk_trigger_detect(void) {
 // re-trigger. Deliberately not called on failure, so a failed clone re-triggers
 // on the next boot.
 static void bk_trigger_persist(void) {
-    eeconfig_update_bk_split_flash_datablock(&bk_image_crc, 0, sizeof(bk_image_crc));
+    argos_write_eeprom(ARGOS_OFFSET_SPLIT_FLASH_CONFIG, &bk_image_crc, sizeof(bk_image_crc));
 }
 
 static void bk_trigger_marker(bool triggered) {
@@ -716,10 +737,14 @@ static void bk_trigger_marker(bool triggered) {
     }
 }
 
-// Terminal state of the one-shot stream: stop and never re-run.
+// Terminal state of the one-shot stream: stop and never re-run. Reopen normal
+// sync on both success and failure so an error cannot disable split sync until
+// reset. Mixed-firmware normal sync is still not guaranteed; a failed clone is
+// retried after reboot because its fingerprint is deliberately not persisted.
 static void bk_stream_finish(bool success) {
-    bk_phase = BK_STREAM_IDLE;
-    bk_done  = true;
+    bk_phase             = BK_STREAM_IDLE;
+    bk_done              = true;
+    bk_traffic_gate_armed = false;
 #ifdef RGB_MATRIX_ENABLE
     bk_indicator_begin(success ? BK_INDICATOR_SUCCESS : BK_INDICATOR_FAILURE);
 #else
@@ -730,10 +755,10 @@ static void bk_stream_finish(bool success) {
 // Three distinct markers per run. `transport` covers the link (the slave's
 // rolling CRC-32 of the bytes it received vs. the master's CRC-32 of the bytes it
 // sent), `flash` covers the staging slot (the CRC-32 of the staging read-back vs.
-// that same expected value), and `commit` is the step-4 verdict. A failing
-// `flash` marker with a passing `transport` marker is unambiguously a flash-write
-// bug; a failing `commit` marker with the first two passing isolates the
-// bootability/commit path.
+// that same expected value), and `commit` is the step-4 verdict. A `flash`
+// marker with reason=crc isolates a staging/read-back mismatch; reason=tx means
+// the VERIFY response was lost and says nothing about the flash contents. A
+// failing `commit` marker with the first two passing isolates the commit path.
 static void bk_transport_marker(bool ok, const char *reason, uint32_t slave_crc) {
     uint32_t own_crc = bk_crc32_finalize(bk_sent_crc);
 
@@ -766,6 +791,8 @@ static void bk_commit_marker(bool ok, const char *action, const char *reason) {
 }
 
 static void bk_stream_start(void) {
+    // Keep this explicit even though post-init normally armed the gate already.
+    bk_traffic_gate_armed = true;
     bk_image_len   = (uint32_t)(__flash_binary_end - __flash_binary_start);
     bk_image_boot2 = bk_boot2_checksum(__flash_binary_start);
     bk_chunk_count = (bk_image_len + BK_SPLIT_FLASH_CHUNK_DATA - 1) / BK_SPLIT_FLASH_CHUNK_DATA;
@@ -783,6 +810,20 @@ static void bk_stream_start(void) {
         bk_probe_start_ms = timer_read32();
         bk_probe_at_ms    = bk_probe_start_ms;
     }
+}
+
+// REPORT and VERIFY do not change the slave's stream state. Retry a lost
+// response a few times before abandoning an otherwise complete transfer.
+static bool bk_control_transaction(bk_split_flash_m2s_t *m2s, bk_split_flash_s2m_t *s2m) {
+    for (uint8_t attempt = 0; attempt <= BK_SPLIT_FLASH_CONTROL_RETRIES; attempt++) {
+        if (transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, m2s, sizeof(*m2s), s2m, sizeof(*s2m))) {
+            return true;
+        }
+        if (attempt < BK_SPLIT_FLASH_CONTROL_RETRIES) {
+            wait_ms(BK_SPLIT_FLASH_CONTROL_RETRY_MS);
+        }
+    }
+    return false;
 }
 
 static void bk_stream_step(void) {
@@ -905,7 +946,7 @@ static void bk_stream_step(void) {
         case BK_STREAM_REPORT: {
             m2s.seq = BK_SPLIT_FLASH_SEQ_REPORT;
 
-            bool     ok        = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            bool     ok        = bk_control_transaction(&m2s, &s2m);
             uint32_t own_crc   = bk_crc32_finalize(bk_sent_crc);
             uint32_t slave_crc = ok ? s2m.ack : 0;
             if (ok && slave_crc == own_crc) {
@@ -921,7 +962,7 @@ static void bk_stream_step(void) {
         case BK_STREAM_VERIFY: {
             m2s.seq = BK_SPLIT_FLASH_SEQ_VERIFY;
 
-            bool     ok       = transport_execute_transaction(BK_SPLIT_FLASH_TRANSACTION, &m2s, sizeof(m2s), &s2m, sizeof(s2m));
+            bool     ok       = bk_control_transaction(&m2s, &s2m);
             uint32_t own_crc  = bk_crc32_finalize(bk_sent_crc);
             uint32_t readback = ok ? s2m.ack : 0;
             if (ok && readback == own_crc) {
@@ -998,7 +1039,9 @@ void housekeeping_task_bk_split_flash(void) {
             bk_probe_start_ms = timer_read32();
             bk_probe_at_ms    = timer_read32();
         } else {
-            bk_done = true;
+            // No clone is pending: promptly restore normal split traffic.
+            bk_traffic_gate_armed = false;
+            bk_done               = true;
         }
     }
 

@@ -9,8 +9,8 @@
 //
 // Step 5: the whole flow is gated by an automatic trigger. On boot the master
 // compares its own firmware fingerprint (whole-image CRC-32) against the value
-// persisted in its module EEPROM datablock; a mismatch (new image, or a fresh
-// zeroed datablock) means a new firmware was just written. Only then
+// persisted in the argos EEPROM block; a mismatch (new image, or a fresh
+// EEPROM) means a new firmware was just written. Only then
 // does the master stream its image to the secondary, which verifies it (boot2
 // checksum + vector-table plausibility + read-back CRC) and commits it (erase
 // active and the wear-leveling EEPROM, copy staging, boot2 last, reset), so the
@@ -84,6 +84,12 @@ bool bk_split_flash_receiving(void);
 // PROBE_TIMEOUT_MS if the secondary never appears (e.g. a lone master).
 #define BK_SPLIT_FLASH_PROBE_RETRY_MS 100
 #define BK_SPLIT_FLASH_PROBE_TIMEOUT_MS 15000
+
+// REPORT and VERIFY are read-only, so a lost response can be retried safely.
+// Give the serial target a short recovery window between attempts. COMMIT is
+// deliberately not retried: its response could be lost after it was accepted.
+#define BK_SPLIT_FLASH_CONTROL_RETRIES 10
+#define BK_SPLIT_FLASH_CONTROL_RETRY_MS 100
 
 // During the active data stream, temporary keyboard unresponsiveness is allowed;
 // bound each master-loop burst so USB and recovery work still get service.
